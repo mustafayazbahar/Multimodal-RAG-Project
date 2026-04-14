@@ -1,0 +1,23 @@
+# Çevresel Değişkenler ve API Anahtarları (Siber Güvenlik Kritik)
+.env
+
+# Sanal Ortam (Boyut Tasarrufu)
+venv/
+env/
+
+# Veritabanı ve Hafıza (Gizlilik)
+user.db
+chroma_db/
+
+# Kullanıcı Tarafından Yüklenen Belgeler ve Çıktılar
+docs/
+docs_images/
+
+# Python Ön Bellek Dosyaları (Gereksiz Çöpler)
+__pycache__/
+*.pyc
+*.pyo
+
+# İşletim Sistemi Kalıntıları
+.DS_Store
+Thumbs.db
