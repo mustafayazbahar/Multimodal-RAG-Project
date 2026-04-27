@@ -4,14 +4,11 @@ import json
 
 DB_NAME = "user.db"
 
-
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
-
 def get_connection():
     return sqlite3.connect(DB_NAME)
-
 
 def create_users_table():
     conn = get_connection()
@@ -26,7 +23,6 @@ def create_users_table():
     conn.commit()
     conn.close()
 
-
 def create_default_admin():
     conn = get_connection()
     c = conn.cursor()
@@ -38,7 +34,6 @@ def create_default_admin():
         )
     conn.commit()
     conn.close()
-
 
 def create_chat_table():
     conn = get_connection()
@@ -67,7 +62,6 @@ def create_chat_table():
     conn.commit()
     conn.close()
 
-
 def register_user(username, password):
     username = (username or "").strip()
     password = password or ""
@@ -89,7 +83,6 @@ def register_user(username, password):
     finally:
         conn.close()
 
-
 def login_user(username, password):
     username = (username or "").strip()
     password = password or ""
@@ -107,7 +100,6 @@ def login_user(username, password):
         return True, result[0]
     return False, None
 
-
 def save_message(username, role, content, sources="", images=None):
     conn = get_connection()
     c = conn.cursor()
@@ -123,7 +115,6 @@ def save_message(username, role, content, sources="", images=None):
     ))
     conn.commit()
     conn.close()
-
 
 def load_chat_history(username):
     conn = get_connection()

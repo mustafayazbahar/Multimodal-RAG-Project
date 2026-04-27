@@ -4,14 +4,14 @@ import time
 import subprocess
 import sys
 import re
-from dotenv import load_dotenv
+import requests
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-# Mac Terminal Uyarısını Susturucu
+# Terminal Uyarısını Susturucu
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # Güvenlik ve Veritabanı (auth.py'dan)
@@ -24,9 +24,6 @@ from auth import (
     register_user,
     login_user
 )
-
-# API anahtarını güvenli ortam dosyasından okur (.env)
-load_dotenv()
 
 st.set_page_config(
     page_title="DeepCampus",
@@ -47,7 +44,7 @@ with col1:
     )
 with col2:
     st.title("DeepCampus: Intelligent Research Assistant")
-    st.caption("Powered by RAG Architecture | Offline-Ready Knowledge Base | Strict Multimodal Filter 🍏")
+    st.caption("Powered by RAG Architecture | Local Llama 3.1 8-Bit | Real-Time Sync 🚀")
 
 st.divider()
 
@@ -176,7 +173,18 @@ with st.sidebar:
                 st.success(f"Saved: {uploaded_file.name}")
 
             if st.button("Process & Update Database", type="primary"):
-                with st.spinner("Processing PDF files..."):
+                with st.spinner("VRAM boşaltılıyor ve PDF'ler işleniyor..."):
+                    # 🚀 MİMARIN DOKUNUŞU: OLLAMA'YI VRAM'DEN KOV
+                    try:
+                        requests.post(
+                            "http://localhost:11434/api/generate", 
+                            json={"model": "llama3.1:8b-instruct-q8_0", "keep_alive": 0}, 
+                            timeout=3
+                        )
+                        print("[BILGI] Ollama VRAM tahliyesi başarılı.")
+                    except:
+                        pass
+
                     try:
                         result = subprocess.run(
                             [sys.executable, "ingest.py"],
@@ -186,7 +194,7 @@ with st.sidebar:
                         if result.returncode == 0:
                             st.success("Database Updated Successfully.")
                             time.sleep(1)
-                            # SENIOR DOKUNUS: Stale Cache'i onlemek icin bellek temizlenir
+                            # 🚀 MİMARIN DOKUNUŞU: Önbelleği temizle ve anlık güncelle!
                             initialize_system.clear()
                             st.rerun()
                         else:
@@ -271,11 +279,11 @@ if user_query := st.chat_input("Ask a question about the documents..."):
 
                     sources_list.append(f"{source_name} (Page {page_num})")
 
-                    if doc_type == "image":
-                        img_path = d.metadata.get("image_path")
+                    if doc_type == "image" or doc_type == "table":
+                        img_path = d.metadata.get("source_path")
                         if img_path and os.path.exists(img_path):
                             found_images.append(img_path)
-                            context_text += f"[IMAGE SUMMARY - ID: {img_path}]: {d.page_content}\n\n"
+                            context_text += f"[{doc_type.upper()} SUMMARY - ID: {img_path}]: {d.page_content}\n\n"
                     else:
                         context_text += f"[TEXT - Page {page_num}]: {d.page_content}\n\n"
 
@@ -283,28 +291,20 @@ if user_query := st.chat_input("Ask a question about the documents..."):
                 unique_sources = sorted(list(set(sources_list)))
                 sources_formatted = ", ".join(unique_sources)
 
-                llm = ChatGoogleGenerativeAI(
-                    model="gemini-2.5-flash",
+                # 🚀 YEREL 8-BİT LLM BAĞLANTISI
+                llm = ChatOllama(
+                    model="llama3.1:8b-instruct-q8_0",
                     temperature=st.session_state.temperature
                 )
 
-                # SENIOR DOKUNUS: Gecmis sohbeti hazirla (Hafiza Geri Geldi)
-                chat_history_text = ""
-                for msg in st.session_state.messages[-5:-1]: 
-                    role_name = "Student" if msg["role"] == "user" else "Assistant"
-                    chat_history_text += f"{role_name}: {msg.get('content', '')}\n"
-
-                template = """You are an expert academic assistant. Answer strictly based on the context.
+                # 🚀 YENİ ESNEK VE YARDIMSEVER PROMPT
+                template = """You are a helpful and expert academic assistant. Answer based on the provided context.
 Rules:
-1. If the exact answer is NOT in the context, strictly reply with: "NO_INFO_FOUND".
-2. IMPORTANT: Answer in the EXACT SAME LANGUAGE as the user's question.
-3. Use the Chat History to understand references like "this", "it", or "compare them".
-4. CRITICAL RULE FOR IMAGES: You are a ruthless judge. ONLY cite an image if it perfectly and directly illustrates your answer.
+1. Use the provided context to answer the question in detail. If the context only partially answers the question, share what you can find. 
+2. If the context is completely unrelated, politely state that the documents don't contain the exact answer, but share any relevant clues you found. Do not use the raw "NO_INFO_FOUND" code anymore.
+3. IMPORTANT: Answer in the EXACT SAME LANGUAGE as the user's question.
+4. IMAGE RULE: Be generous with images. If there is an image, chart, or table in the context that is even slightly relevant or helpful to your explanation, you MUST cite it!
 5. MAXIMUM LIMIT: Cite MAXIMUM 1 IMAGE. Format: [GÖRSEL: filepath].
-6. Do NOT list images just because they exist in the context.
-
-Chat History:
-{history}
 
 Context:
 {context}
@@ -315,44 +315,36 @@ Question: {question}
                 prompt = ChatPromptTemplate.from_template(template)
                 chain = prompt | llm | StrOutputParser()
 
-                # History argumani da invoke icine eklendi
                 raw_answer = chain.invoke({
                     "context": context_text,
-                    "history": chat_history_text,
                     "question": user_query
                 })
 
                 status_container.update(label="Complete.", state="complete", expanded=False)
 
-                if "NO_INFO_FOUND" in raw_answer:
-                    final_answer = "I couldn't find this information in the documents. / Yüklenen belgelerde bu bilgiye ulaşamadım."
-                    final_display_images = []
-                    sources_to_save = ""
-                    st.markdown(final_answer)
+                # 🚀 MİMARIN DOKUNUŞU: Esnek Format Yakalayıcı (Regex)
+                cited_images = re.findall(r'\[(?:GÖRSEL|IMAGE|RESIM|RESİM):\s*(.*?)\]', raw_answer, re.IGNORECASE)
+                final_display_images = [img for img in unique_images if img in cited_images][:1]
+                final_answer = re.sub(r'\[(?:GÖRSEL|IMAGE|RESIM|RESİM):\s*.*?\]', '', raw_answer, flags=re.IGNORECASE).strip()
+                sources_to_save = sources_formatted
+
+                st.markdown(final_answer)
+
+                if sources_to_save:
+                    with st.expander("View Sources"):
+                        st.info(f"References: {sources_to_save}")
+
+                existing_images = [
+                    img for img in final_display_images
+                    if isinstance(img, str) and os.path.exists(img)
+                ]
+                if existing_images:
+                    st.markdown("### 🖼️ İlgili Görsel")
+                    for img in existing_images:
+                        st.image(img, use_container_width=True)
+                    final_display_images = existing_images
                 else:
-                    cited_images = re.findall(r'\[GÖRSEL:\s*(.*?)\]', raw_answer)
-                    final_display_images = [img for img in unique_images if img in cited_images][:1]
-
-                    final_answer = re.sub(r'\[GÖRSEL:\s*.*?\]', '', raw_answer).strip()
-                    sources_to_save = sources_formatted
-
-                    st.markdown(final_answer)
-
-                    if sources_to_save:
-                        with st.expander("View Sources"):
-                            st.info(f"References: {sources_to_save}")
-
-                    existing_images = [
-                        img for img in final_display_images
-                        if isinstance(img, str) and os.path.exists(img)
-                    ]
-                    if existing_images:
-                        st.markdown("### 🖼️ İlgili Görsel")
-                        for img in existing_images:
-                            st.image(img, use_container_width=True)
-                        final_display_images = existing_images
-                    else:
-                        final_display_images = []
+                    final_display_images = []
 
                 assistant_message = {
                     "role": "assistant",
