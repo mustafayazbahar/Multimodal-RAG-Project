@@ -1,0 +1,48 @@
+
+
+services:
+  # 1. MOTOR: Llama 3.1 Sunucusu (Ollama)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: deepcampus_ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      # Llama modelinin her seferinde baştan inmemesi için kalıcı disk alanı
+      - ollama_data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # 2. BEYİN: Bizim yazdığımız Streamlit Uygulaması
+  app:
+    build: .
+    container_name: deepcampus_app
+    ports:
+      - "8501:8501"
+    volumes:
+      # Veri Kalıcılığı (Data Persistence) - Konteyner çökse bile verilerin silinmez
+      - ./docs:/app/docs
+      - ./chroma_db:/app/chroma_db
+      - ./docs_images:/app/docs_images
+      - ./user.db:/app/user.db
+      - ./ingest_state.json:/app/ingest_state.json
+    environment:
+      # Konteynerler arası iletişim portu
+      - OLLAMA_HOST=http://ollama:11434
+    depends_on:
+      - ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  ollama_data:

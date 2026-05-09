@@ -1,27 +1,45 @@
+# --- PyTorch CUDA Optimizasyonu (En üste yazılır) ---
+--extra-index-url https://download.pytorch.org/whl/cu121
+
+# --- Temel Çatı (Web & Ortam) ---
 streamlit>=1.32
 python-dotenv>=1.0
+pandas
 
-# PDF ve Görsel İşleme
+# --- PDF ve Görsel İşleme ---
 PyMuPDF>=1.24
+pdfplumber
 Pillow>=10.0
 easyocr>=1.7
 
-# Derin Öğrenme ve VLM Modelleri
-transformers<4.45.0
-einops>=0.7
-sentence-transformers>=3.0
-huggingface-hub>=0.24
-
-# LangChain ve RAG Mimarisi (Senin sildiğin hayati kısım)
+# --- LangChain ve RAG Ekosistemi (Hayati Kısım Korumaya Alındı) ---
 langchain>=0.3
 langchain-core>=0.3
 langchain-community>=0.3
 langchain-text-splitters>=0.3
 langchain-chroma>=0.2
 langchain-huggingface>=0.1
-langchain-google-genai>=2.0
-google-genai>=1.0
+
+# --- Vektör Veritabanı ---
 chromadb>=0.5
 
-# Stabilite
+# --- Yapay Zeka Beyinleri (Bulut + Yerel) ---
+langchain-google-genai>=2.0
+google-genai>=1.0
+langchain-ollama
+
+# --- Derin Öğrenme, VLM ve Vektör Modelleri (Moondream & E5) ---
+# Arkadaşının modelinin patlamaması için transformers 4.44.2'ye sabitlendi
+transformers==4.44.2
+einops>=0.7
+sentence-transformers>=3.0
+huggingface-hub>=0.24
+accelerate
+
+# --- PyTorch Kütüphaneleri ---
+torch
+torchvision
+torchaudio
+
+# --- Stabilite (Versiyon Çakışmalarını Önleme) ---
 numpy<2

@@ -154,3 +154,12 @@ def load_chat_history(username):
         })
 
     return history
+
+
+
+def clear_chat_history(username):
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("DELETE FROM chat_history WHERE username = ?", (username,))
+    conn.commit()
+    conn.close()

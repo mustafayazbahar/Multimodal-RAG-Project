@@ -21,3 +21,5 @@ __pycache__/
 # İşletim Sistemi Kalıntıları
 .DS_Store
 Thumbs.db
+
+ingest_state.json

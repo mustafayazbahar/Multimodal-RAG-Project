@@ -3,7 +3,9 @@ import sys
 import fitz  # PyMuPDF
 import torch
 import hashlib
+import json
 import easyocr
+import gc #  Çöp Toplayıcı
 from PIL import Image
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from langchain_core.documents import Document
@@ -19,14 +21,35 @@ sys.stdout.reconfigure(encoding='utf-8')
 DOCS_FOLDER = "docs"
 DB_FOLDER = "chroma_db"
 IMG_FOLDER = "docs_images"
+STATE_FILE = "ingest_state.json" # 🚀 Dosya Hash Kayıtları
 
-# DONANIM TESPİTİ (CUDA & Apple MPS Desteği)
+# DONANIM TESPİTİ
 if torch.cuda.is_available():
     device = "cuda"
-elif torch.backends.mps.is_available():
+elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
     device = "mps"
 else:
     device = "cpu"
+
+# ---------------------------------------------------------
+# HASH YARDIMCI FONKSİYONLARI (Artımlı Güncelleme İçin)
+# ---------------------------------------------------------
+def get_file_hash(filepath):
+    hasher = hashlib.sha256()
+    with open(filepath, 'rb') as afile:
+        buf = afile.read()
+        hasher.update(buf)
+    return hasher.hexdigest()
+
+def load_processed_state():
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+def save_processed_state(state):
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=4)
 
 # ---------------------------------------------------------
 # 1. MOTOR: MOONDREAM2 (GÖRSEL YAPAY ZEKA - VLM)
@@ -43,7 +66,6 @@ try:
         revision=target_revision
     )
     
-    # RTX 4080 ve Mac'ler icin Float16 hizlandirmasi (Tensor Cores)
     if device in ["cuda", "mps"]:
         moondream_model = moondream_model.to(device=device, dtype=torch.float16)
     else:
@@ -57,15 +79,12 @@ except Exception as e:
     sys.exit(1)
 
 # ---------------------------------------------------------
-# 2. MOTOR: EASYOCR (HİBRİT FALLBACK / TARANMIŞ BELGE)
+# 2. MOTOR: EASYOCR (HİBRİT FALLBACK)
 # ---------------------------------------------------------
 print("\n[BILGI] EasyOCR (B Planı) yükleniyor...")
 ocr_reader = easyocr.Reader(['tr', 'en'], gpu=True if device in ["cuda", "mps"] else False, verbose=False)
 print(f"[BASARILI] EasyOCR aktif! 🛡️")
 
-# ---------------------------------------------------------
-# GÖRSEL ANALİZ FONKSİYONU
-# ---------------------------------------------------------
 def summarize_image_locally(image_path):
     try:
         image = Image.open(image_path)
@@ -85,38 +104,35 @@ def main():
     for folder in [DOCS_FOLDER, IMG_FOLDER]:
         os.makedirs(folder, exist_ok=True)
 
-    # E5 EMBEDDING VE TOKENIZER YÜKLEME
     print("[BILGI] E5 Embedding ve Tokenizer yükleniyor...")
     embeddings = HuggingFaceEmbeddings(model_name="intfloat/multilingual-e5-base")
     e5_tokenizer = AutoTokenizer.from_pretrained("intfloat/multilingual-e5-base")
 
-    # Veritabanı Kontrolü
-    existing_sources = set()
     db = None
     if os.path.exists(DB_FOLDER):
         try:
             db = Chroma(persist_directory=DB_FOLDER, embedding_function=embeddings)
-            existing_data = db.get(include=['metadatas'])
-            for meta in existing_data.get('metadatas', []):
-                if meta and 'source' in meta:
-                    existing_sources.add(meta['source'])
         except: pass
 
-    files = [f for f in os.listdir(DOCS_FOLDER) if f.lower().endswith('.pdf')]
-    new_files = [f for f in files if f not in existing_sources]
-
-    if not new_files:
-        print("[BASARILI] Sistem güncel.")
-        return
-
+    processed_files = load_processed_state()
+    is_database_updated = False
     documents = []
 
-    for file in new_files:
+    files = [f for f in os.listdir(DOCS_FOLDER) if f.lower().endswith('.pdf')]
+
+    for file in files:
         file_path = os.path.join(DOCS_FOLDER, file)
+        current_hash = get_file_hash(file_path)
+        
+        # 🚀 MİMARIN DOKUNUŞU: HASH KONTROLÜ İLE KOPYA VERİYİ ENGELLEME
+        if file in processed_files and processed_files[file] == current_hash:
+            print(f"[ATLANDI] '{file}' zaten güncel ve vektör veritabanında mevcut.")
+            continue
+            
         pdf_img_folder = os.path.join(IMG_FOLDER, file.replace(".pdf", ""))
         os.makedirs(pdf_img_folder, exist_ok=True)
         
-        print(f"\n[ISLENIYOR] {file}...")
+        print(f"\n[ISLENIYOR] '{file}' yeni veya değiştirilmiş. Vektörize ediliyor...")
         try:
             pdf_document = fitz.open(file_path)
             seen_image_hashes = set()
@@ -124,9 +140,9 @@ def main():
             for page_num in range(len(pdf_document)):
                 page = pdf_document[page_num]
                 
-                # A) HİBRİT METİN AYIKLAMA (Dijital + OCR Fallback)
+                # A) HİBRİT METİN AYIKLAMA
                 text = page.get_text("text").strip()
-                if len(text) < 15: # Taranmış sayfa tespiti
+                if len(text) < 15:
                     pix = page.get_pixmap()
                     img_bytes = pix.tobytes("png")
                     ocr_results = ocr_reader.readtext(img_bytes, detail=0, paragraph=True)
@@ -138,17 +154,17 @@ def main():
                         metadata={"source": file, "page": page_num, "type": "text"}
                     ))
                 
-                # B) GÖRSEL AYIKLAMA (Filtreli)
+                # B) GÖRSEL AYIKLAMA
                 images = page.get_images(full=True)
                 for img_index, img in enumerate(images):
                     xref = img[0]
                     base_image = pdf_document.extract_image(xref)
                     image_bytes = base_image["image"]
                     
-                    if len(image_bytes) < 15000: continue # Küçük logo/çöp filtresi
+                    if len(image_bytes) < 15000: continue
                         
                     img_hash = hashlib.md5(image_bytes).hexdigest()
-                    if img_hash in seen_image_hashes: continue # Kopya filtresi
+                    if img_hash in seen_image_hashes: continue
                     seen_image_hashes.add(img_hash)
                         
                     image_name = f"page_{page_num+1}_img_{img_index+1}.{base_image['ext']}"
@@ -164,18 +180,34 @@ def main():
                     ))
 
             pdf_document.close()
+            processed_files[file] = current_hash
+            is_database_updated = True
+            
         except Exception as e:
             print(f"[HATA] {file}: {e}")
 
-    # TOKEN-BAZLI PARÇALAMA VE KAYIT
+    # 🚀 MİMARIN DOKUNUŞU: VRAM TAHLİYE PROTOKOLÜ (Sistem Çökmesini Önler)
     if documents:
+        print("\n[BILGI] PDF okuma tamamlandı. Moondream VRAM'den kazınıyor...")
+        global moondream_model, tokenizer
+        try:
+            del moondream_model
+            del tokenizer
+        except NameError:
+            pass
+            
+        if device == "cuda":
+            torch.cuda.empty_cache()
+        elif device == "mps":
+            torch.mps.empty_cache()
+            
+        gc.collect()
+
         print("\n[BILGI] E5 Tokenizer ile parçalama yapılıyor...")
-        
-        # 🚀 KRİTİK: Karakter değil, Token bazlı ayırıcı
         text_splitter = RecursiveCharacterTextSplitter.from_huggingface_tokenizer(
             tokenizer=e5_tokenizer,
-            chunk_size=300,      # 300 Token
-            chunk_overlap=50,    # 50 Token örtüşme
+            chunk_size=300,
+            chunk_overlap=50,
             separators=["\n\n", "\n", ".", " ", ""]
         )
         
@@ -189,7 +221,10 @@ def main():
         else:
             Chroma.from_documents(documents=chunks, embedding=embeddings, persist_directory=DB_FOLDER)
             
-        print("[BASARILI] Veritabanı token-bazlı verilerle güncellendi.")
+        save_processed_state(processed_files)
+        print("[BASARILI] Veritabanı sadece YENİ dosyalarla güncellendi.")
+    else:
+        print("\n[BİLGİ] Yeni bir dosya bulunamadı. Veritabanı zaten güncel.")
 
 if __name__ == "__main__":
     main()

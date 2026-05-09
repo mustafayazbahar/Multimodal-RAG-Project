@@ -4,14 +4,15 @@ import time
 import subprocess
 import sys
 import re
+import requests
 from dotenv import load_dotenv
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
-# Mac Terminal Uyarısını Susturucu
+# Terminal Uyarısını Susturucu
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # Güvenlik ve Veritabanı (auth.py'dan)
@@ -22,10 +23,10 @@ from auth import (
     save_message,
     load_chat_history,
     register_user,
-    login_user
+    login_user,
+    clear_chat_history
 )
 
-# API anahtarını güvenli ortam dosyasından okur (.env)
 load_dotenv()
 
 st.set_page_config(
@@ -47,7 +48,7 @@ with col1:
     )
 with col2:
     st.title("DeepCampus: Intelligent Research Assistant")
-    st.caption("Powered by RAG Architecture | Offline-Ready Knowledge Base | Strict Multimodal Filter 🍏")
+    st.caption("Powered by RAG Architecture | Local Llama 3.1 8-Bit | Real-Time Sync 🚀")
 
 st.divider()
 
@@ -107,18 +108,25 @@ with st.sidebar:
 
     if not st.session_state.logged_in:
         menu = st.radio("Select Option", ["Login", "Register"])
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
+        
+        # 🚀 MİMARIN DOKUNUŞU: 'Enter' Tuşu Sorununun Çözümü (Form Yapısı)
+        with st.form("auth_form"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            
+            if menu == "Register":
+                submitted = st.form_submit_button("Create Account")
+            else:
+                submitted = st.form_submit_button("Login")
 
-        if menu == "Register":
-            if st.button("Create Account"):
+        if submitted:
+            if menu == "Register":
                 success = register_user(username, password)
                 if success:
                     st.success("Account created! You can now login.")
                 else:
                     st.error("Username already exists or invalid input.")
-        else:
-            if st.button("Login"):
+            else:
                 success, role = login_user(username, password)
                 if success:
                     st.session_state.logged_in = True
@@ -134,12 +142,21 @@ with st.sidebar:
     else:
         st.success(f"Logged in as {st.session_state.username} ({st.session_state.role})")
 
-        if st.button("Logout"):
-            st.session_state.logged_in = False
-            st.session_state.role = None
-            st.session_state.username = None
-            st.session_state.messages = []
-            st.rerun()
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Logout", use_container_width=True):
+                st.session_state.logged_in = False
+                st.session_state.role = None
+                st.session_state.username = None
+                st.session_state.messages = []
+                st.rerun()
+        
+        with col2:
+            if st.button("🗑️ Clear Chat", use_container_width=True):
+                clear_chat_history(st.session_state.username)
+                st.session_state.messages = [] # Ekrandaki mesajları da sil
+                st.rerun()
 
         st.divider()
 
@@ -176,7 +193,18 @@ with st.sidebar:
                 st.success(f"Saved: {uploaded_file.name}")
 
             if st.button("Process & Update Database", type="primary"):
-                with st.spinner("Processing PDF files..."):
+                with st.spinner("VRAM boşaltılıyor ve PDF'ler işleniyor..."):
+                    # 🚀 MİMARIN DOKUNUŞU: OLLAMA'YI VRAM'DEN KOV
+                    try:
+                        requests.post(
+                            "http://ollama:11434/api/generate", 
+                            json={"model": "llama3.1:8b-instruct-q8_0", "keep_alive": 0}, 
+                            timeout=3
+                        )
+                        print("[BILGI] Ollama VRAM tahliyesi başarılı.")
+                    except:
+                        pass
+
                     try:
                         result = subprocess.run(
                             [sys.executable, "ingest.py"],
@@ -186,7 +214,6 @@ with st.sidebar:
                         if result.returncode == 0:
                             st.success("Database Updated Successfully.")
                             time.sleep(1)
-                            # SENIOR DOKUNUS: Stale Cache'i onlemek icin bellek temizlenir
                             initialize_system.clear()
                             st.rerun()
                         else:
@@ -257,6 +284,8 @@ if user_query := st.chat_input("Ask a question about the documents..."):
                 retriever = vectorstore.as_retriever(
                     search_kwargs={"k": st.session_state.k_value}
                 )
+                
+                # 🚀 E5 Modeli İçin Query Dönüştürme
                 docs = retriever.invoke(f"query: {user_query}")
 
                 status_container.write("Synthesizing and filtering images...")
@@ -264,44 +293,47 @@ if user_query := st.chat_input("Ask a question about the documents..."):
                 found_images = []
                 sources_list = []
 
+                # 🚀 SENIOR DOKUNUŞU: Röntgen (Metin mi, Görsel mi?)
                 for d in docs:
                     source_name = d.metadata.get("source", "Unknown Source")
                     page_num = int(d.metadata.get("page", 0)) + 1
                     doc_type = d.metadata.get("type", "text")
 
-                    sources_list.append(f"{source_name} (Page {page_num})")
-
                     if doc_type == "image":
+                        sources_list.append(f"🖼️ [GÖRSEL] {source_name} (Page {page_num})")
                         img_path = d.metadata.get("image_path")
                         if img_path and os.path.exists(img_path):
                             found_images.append(img_path)
                             context_text += f"[IMAGE SUMMARY - ID: {img_path}]: {d.page_content}\n\n"
                     else:
+                        sources_list.append(f"📄 [METİN] {source_name} (Page {page_num})")
                         context_text += f"[TEXT - Page {page_num}]: {d.page_content}\n\n"
 
                 unique_images = list(dict.fromkeys(found_images))
                 unique_sources = sorted(list(set(sources_list)))
                 sources_formatted = ", ".join(unique_sources)
 
-                llm = ChatGoogleGenerativeAI(
-                    model="gemini-2.5-flash",
+                # 🚀 YEREL LLAMA 3.1 BAĞLANTISI
+                llm = ChatOllama(
+                    model="llama3.1:8b-instruct-q8_0",
                     temperature=st.session_state.temperature
                 )
 
-                # SENIOR DOKUNUS: Gecmis sohbeti hazirla (Hafiza Geri Geldi)
+                # 🚀 MİMARIN DOKUNUŞU: Hafıza Geri Geldi
                 chat_history_text = ""
                 for msg in st.session_state.messages[-5:-1]: 
                     role_name = "Student" if msg["role"] == "user" else "Assistant"
                     chat_history_text += f"{role_name}: {msg.get('content', '')}\n"
 
-                template = """You are an expert academic assistant. Answer strictly based on the context.
-Rules:
-1. If the exact answer is NOT in the context, strictly reply with: "NO_INFO_FOUND".
-2. IMPORTANT: Answer in the EXACT SAME LANGUAGE as the user's question.
-3. Use the Chat History to understand references like "this", "it", or "compare them".
-4. CRITICAL RULE FOR IMAGES: You are a ruthless judge. ONLY cite an image if it perfectly and directly illustrates your answer.
-5. MAXIMUM LIMIT: Cite MAXIMUM 1 IMAGE. Format: [GÖRSEL: filepath].
-6. Do NOT list images just because they exist in the context.
+                
+            
+                template = """You are a highly capable academic assistant. You have full system privileges to analyze and display images.
+CRITICAL RULES:
+1. NEVER say "I cannot show images" or "I cannot see images". You CAN and MUST show them if they are in the Context.
+2. Answer in the EXACT SAME LANGUAGE as the user's question.
+3. If the Context contains a section labeled [IMAGE SUMMARY - ID: filepath], and it is relevant to the question, you MUST cite it exactly like this at the end of your answer: [GÖRSEL: filepath]
+4. NEVER make up a filepath. Only use the exact ID provided in the context.
+5. Use the Chat History for context if needed.
 
 Chat History:
 {history}
@@ -311,11 +343,9 @@ Context:
 
 Question: {question}
 """
-
                 prompt = ChatPromptTemplate.from_template(template)
                 chain = prompt | llm | StrOutputParser()
 
-                # History argumani da invoke icine eklendi
                 raw_answer = chain.invoke({
                     "context": context_text,
                     "history": chat_history_text,
@@ -324,35 +354,30 @@ Question: {question}
 
                 status_container.update(label="Complete.", state="complete", expanded=False)
 
-                if "NO_INFO_FOUND" in raw_answer:
-                    final_answer = "I couldn't find this information in the documents. / Yüklenen belgelerde bu bilgiye ulaşamadım."
-                    final_display_images = []
-                    sources_to_save = ""
-                    st.markdown(final_answer)
+                # 🚀 MİMARIN DOKUNUŞU: Çok Dilli Regex Görsel Yakalayıcı
+                cited_images = re.findall(r'\[(?:GÖRSEL|IMAGE|RESIM|RESİM):\s*(.*?)\]', raw_answer, re.IGNORECASE)
+                final_display_images = [img for img in unique_images if img in cited_images][:1]
+                
+                final_answer = re.sub(r'\[(?:GÖRSEL|IMAGE|RESIM|RESİM):\s*.*?\]', '', raw_answer, flags=re.IGNORECASE).strip()
+                sources_to_save = sources_formatted
+
+                st.markdown(final_answer)
+
+                if sources_to_save:
+                    with st.expander("View Sources"):
+                        st.info(f"References: {sources_to_save}")
+
+                existing_images = [
+                    img for img in final_display_images
+                    if isinstance(img, str) and os.path.exists(img)
+                ]
+                if existing_images:
+                    st.markdown("### 🖼️ İlgili Görsel")
+                    for img in existing_images:
+                        st.image(img, use_container_width=True)
+                    final_display_images = existing_images
                 else:
-                    cited_images = re.findall(r'\[GÖRSEL:\s*(.*?)\]', raw_answer)
-                    final_display_images = [img for img in unique_images if img in cited_images][:1]
-
-                    final_answer = re.sub(r'\[GÖRSEL:\s*.*?\]', '', raw_answer).strip()
-                    sources_to_save = sources_formatted
-
-                    st.markdown(final_answer)
-
-                    if sources_to_save:
-                        with st.expander("View Sources"):
-                            st.info(f"References: {sources_to_save}")
-
-                    existing_images = [
-                        img for img in final_display_images
-                        if isinstance(img, str) and os.path.exists(img)
-                    ]
-                    if existing_images:
-                        st.markdown("### 🖼️ İlgili Görsel")
-                        for img in existing_images:
-                            st.image(img, use_container_width=True)
-                        final_display_images = existing_images
-                    else:
-                        final_display_images = []
+                    final_display_images = []
 
                 assistant_message = {
                     "role": "assistant",
