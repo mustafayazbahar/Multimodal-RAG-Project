@@ -118,33 +118,27 @@ if not _logged_in():
             "Hybrid Retrieval-Augmented Generation over your academic PDFs. "
             "Sign in to start asking questions.",
         )
-        tab_login, tab_register = st.tabs(["Sign in", "Create account"])
 
-        # Both tabs use st.form → pressing Enter inside any input submits.
-        with tab_login:
-            with st.form("login_form", clear_on_submit=False):
-                u = st.text_input("Username", key="login_user", autocomplete="username")
-                p = st.text_input(
-                    "Password",
-                    type="password",
-                    key="login_pw",
-                    autocomplete="current-password",
-                )
-                if st.form_submit_button("Sign in", type="primary", use_container_width=True):
-                    _handle_auth("Login", u, p)
+        # Mode toggle lives OUTSIDE the form. st.form inside st.tabs in
+        # Streamlit 1.57 sometimes swallows the Enter keystroke; placing
+        # the form at top level fixes Enter-to-submit reliably.
+        mode = st.radio(
+            "Mode",
+            options=["Sign in", "Create account"],
+            horizontal=True,
+            label_visibility="collapsed",
+            key="auth_mode",
+        )
+
+        with st.form("auth_form", clear_on_submit=False):
+            u = st.text_input("Username", key="auth_user")
+            p = st.text_input("Password", type="password", key="auth_pw")
+            label = "Sign in" if mode == "Sign in" else "Create account"
+            if st.form_submit_button(label, type="primary", use_container_width=True):
+                _handle_auth("Login" if mode == "Sign in" else "Register", u, p)
+
+        if mode == "Sign in":
             st.caption("Default admin: `admin / admin123` — change in `.env` before production.")
-
-        with tab_register:
-            with st.form("register_form", clear_on_submit=False):
-                u = st.text_input("Username", key="reg_user", autocomplete="username")
-                p = st.text_input(
-                    "Password",
-                    type="password",
-                    key="reg_pw",
-                    autocomplete="new-password",
-                )
-                if st.form_submit_button("Create account", type="primary", use_container_width=True):
-                    _handle_auth("Register", u, p)
     st.stop()
 
 

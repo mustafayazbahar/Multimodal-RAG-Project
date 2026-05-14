@@ -48,12 +48,18 @@ _CSS = r"""
 }
 
 /* ───────── Global ───────── */
-html, body, .stApp, [class^="st-"], [class*=" st-"] {
+html, body, .stApp {
   font-family: 'Inter', 'SF Pro Text', -apple-system, BlinkMacSystemFont,
-               'Segoe UI', Roboto, sans-serif !important;
+               'Segoe UI', Roboto, sans-serif;
   letter-spacing: -0.005em;
 }
 .stApp { background: var(--bg); }
+
+/* Don't touch Material Symbols / Material Icons spans — they need their
+   own font-family to render the icon ligatures. */
+[class*="material-symbols"], [class*="material-icons"] {
+  font-family: 'Material Symbols Rounded', 'Material Icons' !important;
+}
 
 /* Hide Streamlit chrome */
 #MainMenu { visibility: hidden; }
