@@ -1,230 +1,266 @@
-import os
-import sys
-import fitz  # PyMuPDF
-import torch
+"""PDF ingestion pipeline: hybrid OCR + VLM image summarization + E5 chunking."""
+from __future__ import annotations
+
+import gc
 import hashlib
 import json
-import easyocr
-import gc #  Çöp Toplayıcı
+import ssl
+import sys
+from pathlib import Path
+
+import fitz  # PyMuPDF
+import torch
+from langchain_chroma import Chroma
+from langchain_core.documents import Document
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from PIL import Image
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from langchain_core.documents import Document
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_chroma import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings
 
-# Terminal UTF-8 ve SSL Sorunlarını Çözmek İçin
-import ssl
+from config import settings
+from logging_config import get_logger
+
 ssl._create_default_https_context = ssl._create_unverified_context
-sys.stdout.reconfigure(encoding='utf-8')
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except AttributeError:
+    pass
 
-DOCS_FOLDER = "docs"
-DB_FOLDER = "chroma_db"
-IMG_FOLDER = "docs_images"
-STATE_FILE = "ingest_state.json" # 🚀 Dosya Hash Kayıtları
+log = get_logger(__name__)
 
-# DONANIM TESPİTİ
-if torch.cuda.is_available():
-    device = "cuda"
-elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-    device = "mps"
-else:
-    device = "cpu"
 
-# ---------------------------------------------------------
-# HASH YARDIMCI FONKSİYONLARI (Artımlı Güncelleme İçin)
-# ---------------------------------------------------------
-def get_file_hash(filepath):
+def _detect_device() -> str:
+    if torch.cuda.is_available():
+        return "cuda"
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def get_file_hash(filepath: Path) -> str:
     hasher = hashlib.sha256()
-    with open(filepath, 'rb') as afile:
-        buf = afile.read()
-        hasher.update(buf)
+    with open(filepath, "rb") as f:
+        hasher.update(f.read())
     return hasher.hexdigest()
 
-def load_processed_state():
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+
+def load_processed_state(state_file: Path) -> dict:
+    if state_file.exists():
+        try:
+            return json.loads(state_file.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            log.warning("Corrupt state file at %s — starting fresh.", state_file)
     return {}
 
-def save_processed_state(state):
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=4)
 
-# ---------------------------------------------------------
-# 1. MOTOR: MOONDREAM2 (GÖRSEL YAPAY ZEKA - VLM)
-# ---------------------------------------------------------
-model_id = "vikhyatk/moondream2"
-target_revision = "2024-08-26"
+def save_processed_state(state: dict, state_file: Path) -> None:
+    state_file.write_text(json.dumps(state, indent=4), encoding="utf-8")
 
-print(f"\n[BILGI] Yerel Görsel Yapay Zeka (Moondream2) yükleniyor...")
-try:
-    tokenizer = AutoTokenizer.from_pretrained(model_id, revision=target_revision, trust_remote_code=True)
-    moondream_model = AutoModelForCausalLM.from_pretrained(
-        model_id,
-        trust_remote_code=True,
-        revision=target_revision
+
+def load_moondream(device: str):
+    model_id = settings.models.vlm_model
+    revision = settings.models.vlm_revision
+    log.info("Loading VLM '%s' (revision %s) on %s...", model_id, revision, device)
+    tokenizer = AutoTokenizer.from_pretrained(model_id, revision=revision, trust_remote_code=True)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_id, trust_remote_code=True, revision=revision
     )
-    
-    if device in ["cuda", "mps"]:
-        moondream_model = moondream_model.to(device=device, dtype=torch.float16)
+    if device in ("cuda", "mps"):
+        model = model.to(device=device, dtype=torch.float16)
     else:
-        moondream_model = moondream_model.to(device)
-        
-    moondream_model.eval()
-    print(f"[BASARILI] Moondream2 '{device}' üzerinde aktif! 🚀")
+        model = model.to(device)
+    model.eval()
+    log.info("VLM ready on %s.", device)
+    return model, tokenizer
 
-except Exception as e:
-    print(f"[KRITIK HATA] Moondream yüklenemedi: {e}")
-    sys.exit(1)
 
-# ---------------------------------------------------------
-# 2. MOTOR: EASYOCR (HİBRİT FALLBACK)
-# ---------------------------------------------------------
-print("\n[BILGI] EasyOCR (B Planı) yükleniyor...")
-ocr_reader = easyocr.Reader(['tr', 'en'], gpu=True if device in ["cuda", "mps"] else False, verbose=False)
-print(f"[BASARILI] EasyOCR aktif! 🛡️")
+def load_ocr_reader(device: str):
+    import easyocr
 
-def summarize_image_locally(image_path):
+    log.info("Loading EasyOCR fallback...")
+    reader = easyocr.Reader(
+        list(settings.rag.ocr_languages),
+        gpu=device in ("cuda", "mps"),
+        verbose=False,
+    )
+    log.info("EasyOCR ready.")
+    return reader
+
+
+def summarize_image(model, tokenizer, image_path: Path) -> str:
     try:
         image = Image.open(image_path)
-        enc_image = moondream_model.encode_image(image)
-        strict_prompt = "Describe this image, chart, or table briefly for a search engine. Read and extract all visible text, column names, and data strictly. Be concise and technical."
-        answer = moondream_model.answer_question(enc_image, strict_prompt, tokenizer)
-        return answer
-    except Exception as e:
-        return "Görsel içeriği teknik nedenlerle çözümlenemedi."
+        enc_image = model.encode_image(image)
+        prompt = (
+            "Describe this image, chart, or table briefly for a search engine. "
+            "Read and extract all visible text, column names, and data strictly. "
+            "Be concise and technical."
+        )
+        return model.answer_question(enc_image, prompt, tokenizer)
+    except (OSError, RuntimeError) as exc:
+        log.warning("Image summarization failed for %s: %s", image_path, exc)
+        return "Image content could not be analyzed."
 
-# ---------------------------------------------------------
-# ANA VERİ BORU HATTI
-# ---------------------------------------------------------
-def main():
-    print("\n[BILGI] Token-Bazlı Hibrit İşleme Başlatılıyor...")
-    
-    for folder in [DOCS_FOLDER, IMG_FOLDER]:
-        os.makedirs(folder, exist_ok=True)
 
-    print("[BILGI] E5 Embedding ve Tokenizer yükleniyor...")
-    embeddings = HuggingFaceEmbeddings(model_name="intfloat/multilingual-e5-base")
-    e5_tokenizer = AutoTokenizer.from_pretrained("intfloat/multilingual-e5-base")
+def extract_documents_from_pdf(
+    pdf_path: Path,
+    img_root: Path,
+    moondream_model,
+    moondream_tokenizer,
+    ocr_reader,
+) -> list[Document]:
+    documents: list[Document] = []
+    pdf_img_folder = img_root / pdf_path.stem
+    pdf_img_folder.mkdir(parents=True, exist_ok=True)
+
+    with fitz.open(pdf_path) as pdf_document:
+        seen_image_hashes: set[str] = set()
+        for page_num in range(len(pdf_document)):
+            page = pdf_document[page_num]
+
+            text = page.get_text("text").strip()
+            if len(text) < settings.rag.min_text_chars:
+                pix = page.get_pixmap()
+                img_bytes = pix.tobytes("png")
+                ocr_results = ocr_reader.readtext(img_bytes, detail=0, paragraph=True)
+                text = "\n".join(ocr_results).strip()
+
+            if text:
+                documents.append(
+                    Document(
+                        page_content=text,
+                        metadata={"source": pdf_path.name, "page": page_num, "type": "text"},
+                    )
+                )
+
+            for img_index, img in enumerate(page.get_images(full=True)):
+                xref = img[0]
+                base_image = pdf_document.extract_image(xref)
+                image_bytes = base_image["image"]
+                if len(image_bytes) < settings.rag.min_image_bytes:
+                    continue
+                img_hash = hashlib.md5(image_bytes).hexdigest()
+                if img_hash in seen_image_hashes:
+                    continue
+                seen_image_hashes.add(img_hash)
+
+                image_name = f"page_{page_num + 1}_img_{img_index + 1}.{base_image['ext']}"
+                image_path = pdf_img_folder / image_name
+                image_path.write_bytes(image_bytes)
+
+                summary = summarize_image(moondream_model, moondream_tokenizer, image_path)
+                documents.append(
+                    Document(
+                        page_content=f"[IMAGE SUMMARY]: {summary}",
+                        metadata={
+                            "source": pdf_path.name,
+                            "page": page_num,
+                            "image_path": str(image_path),
+                            "type": "image",
+                        },
+                    )
+                )
+    return documents
+
+
+def main() -> None:
+    log.info("Starting token-based hybrid ingestion pipeline...")
+    device = _detect_device()
+
+    settings.paths.docs.mkdir(parents=True, exist_ok=True)
+    settings.paths.docs_images.mkdir(parents=True, exist_ok=True)
+
+    try:
+        moondream_model, moondream_tokenizer = load_moondream(device)
+    except Exception as exc:  # noqa: BLE001 - critical bootstrap failure
+        log.critical("Could not load VLM: %s", exc)
+        sys.exit(1)
+
+    ocr_reader = load_ocr_reader(device)
+
+    log.info("Loading E5 embedding model and tokenizer...")
+    embeddings = HuggingFaceEmbeddings(model_name=settings.models.embedding_model)
+    e5_tokenizer = AutoTokenizer.from_pretrained(settings.models.embedding_model)
 
     db = None
-    if os.path.exists(DB_FOLDER):
+    if settings.paths.chroma_db.exists():
         try:
-            db = Chroma(persist_directory=DB_FOLDER, embedding_function=embeddings)
-        except: pass
+            db = Chroma(
+                persist_directory=str(settings.paths.chroma_db),
+                embedding_function=embeddings,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Could not open existing Chroma store, will recreate: %s", exc)
 
-    processed_files = load_processed_state()
-    is_database_updated = False
-    documents = []
+    processed_files = load_processed_state(settings.paths.state_file)
+    documents: list[Document] = []
 
-    files = [f for f in os.listdir(DOCS_FOLDER) if f.lower().endswith('.pdf')]
+    pdf_files = sorted(p for p in settings.paths.docs.iterdir() if p.suffix.lower() == ".pdf")
 
-    for file in files:
-        file_path = os.path.join(DOCS_FOLDER, file)
-        current_hash = get_file_hash(file_path)
-        
-        # 🚀 MİMARIN DOKUNUŞU: HASH KONTROLÜ İLE KOPYA VERİYİ ENGELLEME
-        if file in processed_files and processed_files[file] == current_hash:
-            print(f"[ATLANDI] '{file}' zaten güncel ve vektör veritabanında mevcut.")
+    for pdf_path in pdf_files:
+        try:
+            current_hash = get_file_hash(pdf_path)
+        except OSError as exc:
+            log.warning("Could not read %s: %s", pdf_path, exc)
             continue
-            
-        pdf_img_folder = os.path.join(IMG_FOLDER, file.replace(".pdf", ""))
-        os.makedirs(pdf_img_folder, exist_ok=True)
-        
-        print(f"\n[ISLENIYOR] '{file}' yeni veya değiştirilmiş. Vektörize ediliyor...")
+
+        if processed_files.get(pdf_path.name) == current_hash:
+            log.info("[SKIP] '%s' already indexed and unchanged.", pdf_path.name)
+            continue
+
+        log.info("[PROCESS] '%s' — new or modified, vectorizing...", pdf_path.name)
         try:
-            pdf_document = fitz.open(file_path)
-            seen_image_hashes = set()
-            
-            for page_num in range(len(pdf_document)):
-                page = pdf_document[page_num]
-                
-                # A) HİBRİT METİN AYIKLAMA
-                text = page.get_text("text").strip()
-                if len(text) < 15:
-                    pix = page.get_pixmap()
-                    img_bytes = pix.tobytes("png")
-                    ocr_results = ocr_reader.readtext(img_bytes, detail=0, paragraph=True)
-                    text = "\n".join(ocr_results).strip()
+            new_docs = extract_documents_from_pdf(
+                pdf_path,
+                settings.paths.docs_images,
+                moondream_model,
+                moondream_tokenizer,
+                ocr_reader,
+            )
+            documents.extend(new_docs)
+            processed_files[pdf_path.name] = current_hash
+        except (RuntimeError, OSError, ValueError) as exc:
+            log.error("Failed to ingest %s: %s", pdf_path.name, exc)
 
-                if text:
-                    documents.append(Document(
-                        page_content=text,
-                        metadata={"source": file, "page": page_num, "type": "text"}
-                    ))
-                
-                # B) GÖRSEL AYIKLAMA
-                images = page.get_images(full=True)
-                for img_index, img in enumerate(images):
-                    xref = img[0]
-                    base_image = pdf_document.extract_image(xref)
-                    image_bytes = base_image["image"]
-                    
-                    if len(image_bytes) < 15000: continue
-                        
-                    img_hash = hashlib.md5(image_bytes).hexdigest()
-                    if img_hash in seen_image_hashes: continue
-                    seen_image_hashes.add(img_hash)
-                        
-                    image_name = f"page_{page_num+1}_img_{img_index+1}.{base_image['ext']}"
-                    image_path = os.path.join(pdf_img_folder, image_name)
-                    
-                    with open(image_path, "wb") as f:
-                        f.write(image_bytes)
-                        
-                    summary = summarize_image_locally(image_path)
-                    documents.append(Document(
-                        page_content=f"[GÖRSEL ÖZETİ]: {summary}",
-                        metadata={"source": file, "page": page_num, "image_path": image_path, "type": "image"}
-                    ))
+    if not documents:
+        log.info("No new documents found. Vector store is already up-to-date.")
+        return
 
-            pdf_document.close()
-            processed_files[file] = current_hash
-            is_database_updated = True
-            
-        except Exception as e:
-            print(f"[HATA] {file}: {e}")
+    log.info("PDF reading done. Evicting VLM from VRAM before embedding...")
+    try:
+        del moondream_model
+        del moondream_tokenizer
+    except NameError:
+        pass
+    if device == "cuda":
+        torch.cuda.empty_cache()
+    elif device == "mps":
+        torch.mps.empty_cache()
+    gc.collect()
 
-    # 🚀 MİMARIN DOKUNUŞU: VRAM TAHLİYE PROTOKOLÜ (Sistem Çökmesini Önler)
-    if documents:
-        print("\n[BILGI] PDF okuma tamamlandı. Moondream VRAM'den kazınıyor...")
-        global moondream_model, tokenizer
-        try:
-            del moondream_model
-            del tokenizer
-        except NameError:
-            pass
-            
-        if device == "cuda":
-            torch.cuda.empty_cache()
-        elif device == "mps":
-            torch.mps.empty_cache()
-            
-        gc.collect()
+    log.info("Splitting documents with E5 tokenizer...")
+    text_splitter = RecursiveCharacterTextSplitter.from_huggingface_tokenizer(
+        tokenizer=e5_tokenizer,
+        chunk_size=settings.rag.chunk_size,
+        chunk_overlap=settings.rag.chunk_overlap,
+        separators=["\n\n", "\n", ".", " ", ""],
+    )
+    chunks = text_splitter.split_documents(documents)
+    for chunk in chunks:
+        chunk.page_content = f"passage: {chunk.page_content}"
 
-        print("\n[BILGI] E5 Tokenizer ile parçalama yapılıyor...")
-        text_splitter = RecursiveCharacterTextSplitter.from_huggingface_tokenizer(
-            tokenizer=e5_tokenizer,
-            chunk_size=300,
-            chunk_overlap=50,
-            separators=["\n\n", "\n", ".", " ", ""]
-        )
-        
-        chunks = text_splitter.split_documents(documents)
-        
-        for chunk in chunks:
-            chunk.page_content = f"passage: {chunk.page_content}"
-        
-        if db is not None:
-            db.add_documents(chunks)
-        else:
-            Chroma.from_documents(documents=chunks, embedding=embeddings, persist_directory=DB_FOLDER)
-            
-        save_processed_state(processed_files)
-        print("[BASARILI] Veritabanı sadece YENİ dosyalarla güncellendi.")
+    if db is not None:
+        db.add_documents(chunks)
     else:
-        print("\n[BİLGİ] Yeni bir dosya bulunamadı. Veritabanı zaten güncel.")
+        Chroma.from_documents(
+            documents=chunks,
+            embedding=embeddings,
+            persist_directory=str(settings.paths.chroma_db),
+        )
+
+    save_processed_state(processed_files, settings.paths.state_file)
+    log.info("Vector store updated with %d new chunks.", len(chunks))
+
 
 if __name__ == "__main__":
     main()

@@ -1,25 +1,36 @@
-# Çevresel Değişkenler ve API Anahtarları (Siber Güvenlik Kritik)
+# Environment & secrets
 .env
+.env.local
 
-# Sanal Ortam (Boyut Tasarrufu)
+# Virtualenvs
 venv/
 env/
+.venv/
 
-# Veritabanı ve Hafıza (Gizlilik)
+# Local data & databases
 user.db
+*.sqlite
+*.sqlite3
 chroma_db/
-
-# Kullanıcı Tarafından Yüklenen Belgeler ve Çıktılar
 docs/
 docs_images/
+ingest_state.json
+data/
 
-# Python Ön Bellek Dosyaları (Gereksiz Çöpler)
+# Python caches
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
 
-# İşletim Sistemi Kalıntıları
+# OS noise
 .DS_Store
 Thumbs.db
 
-ingest_state.json
+# IDE
+.idea/
+.vscode/
+*.swp
