@@ -24,7 +24,7 @@ langchain-text-splitters>=0.3,<0.4
 qdrant-client>=1.9,<2.0
 
 # --- Embeddings (BGE-M3 via FlagEmbedding) ---
-FlagEmbedding>=1.2.10,<2.0
+FlagEmbedding>=1.2.10,<1.3
 transformers==4.44.2
 sentence-transformers>=3.0,<4.0
 einops>=0.7,<1.0

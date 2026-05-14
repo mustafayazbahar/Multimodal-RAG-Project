@@ -23,9 +23,13 @@ COOKIE_NAME = "dc_session"
 COOKIE_TTL_HOURS = int(os.getenv("JWT_TTL_HOURS", "12"))
 
 
-@st.cache_resource
 def _cookie_manager() -> stx.CookieManager:
-    return stx.CookieManager(key="dc_cookie_manager")
+    """Return a single CookieManager instance per session."""
+    if "_dc_cookie_manager" not in st.session_state:
+        st.session_state["_dc_cookie_manager"] = stx.CookieManager(
+            key="dc_cookie_manager"
+        )
+    return st.session_state["_dc_cookie_manager"]
 
 
 def load_cookie() -> dict | None:
