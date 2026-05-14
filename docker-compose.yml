@@ -1,15 +1,17 @@
-
-
 services:
-  # 1. MOTOR: Llama 3.1 Sunucusu (Ollama)
   ollama:
     image: ollama/ollama:latest
     container_name: deepcampus_ollama
     ports:
       - "11434:11434"
     volumes:
-      # Llama modelinin her seferinde baştan inmemesi için kalıcı disk alanı
       - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
     deploy:
       resources:
         reservations:
@@ -18,24 +20,31 @@ services:
               count: all
               capabilities: [gpu]
 
-  # 2. BEYİN: Bizim yazdığımız Streamlit Uygulaması
   app:
     build: .
     container_name: deepcampus_app
     ports:
       - "8501:8501"
     volumes:
-      # Veri Kalıcılığı (Data Persistence) - Konteyner çökse bile verilerin silinmez
+      # Persist data via directory bind-mounts only — never bind-mount a single
+      # file that may not exist on the host (Docker would create it as a dir).
       - ./docs:/app/docs
       - ./chroma_db:/app/chroma_db
       - ./docs_images:/app/docs_images
-      - ./user.db:/app/user.db
-      - ./ingest_state.json:/app/ingest_state.json
+      - ./data:/app/data
     environment:
-      # Konteynerler arası iletişim portu
       - OLLAMA_HOST=http://ollama:11434
+      - USER_DB_PATH=/app/data/user.db
+      - INGEST_STATE_PATH=/app/data/ingest_state.json
     depends_on:
-      - ollama
+      ollama:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:8501/_stcore/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
     deploy:
       resources:
         reservations:
