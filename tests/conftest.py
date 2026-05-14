@@ -16,6 +16,5 @@ def pytest_configure(config):  # noqa: D401 - pytest hook
     os.environ.setdefault("USER_DB_PATH", str(tmp / "test_user.db"))
     os.environ.setdefault("INGEST_STATE_PATH", str(tmp / "test_state.json"))
     os.environ.setdefault("DOCS_PATH", str(tmp / "docs"))
-    os.environ.setdefault("CHROMA_DB_PATH", str(tmp / "chroma_db"))
     os.environ.setdefault("DOCS_IMAGES_PATH", str(tmp / "docs_images"))
-    os.environ.setdefault("RERANKER_ENABLED", "false")
+    os.environ.setdefault("JWT_SECRET", "test-secret")

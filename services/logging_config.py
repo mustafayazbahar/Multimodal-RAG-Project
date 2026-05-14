@@ -1,20 +1,17 @@
-"""Structured logging configuration for DeepCampus."""
+"""Structured logging configuration."""
 from __future__ import annotations
 
 import logging
 import os
 import sys
 
-
 _CONFIGURED = False
 
 
 def configure_logging(level: str | None = None) -> None:
-    """Configure root logger once. Safe to call multiple times."""
     global _CONFIGURED
     if _CONFIGURED:
         return
-
     log_level = (level or os.getenv("LOG_LEVEL", "INFO")).upper()
     logging.basicConfig(
         level=log_level,
