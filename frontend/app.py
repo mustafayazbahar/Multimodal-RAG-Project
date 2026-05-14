@@ -103,9 +103,7 @@ def _logout() -> None:
     ses.clear_cookie()
     for key in ("token", "username", "role", "messages", "available_models",
                 "selected_model"):
-        st.session_state[key] = None if key != "messages" else []
-        if key == "available_models":
-            st.session_state[key] = []
+        st.session_state[key] = [] if key in ("messages", "available_models") else None
     st.rerun()
 
 
@@ -362,7 +360,7 @@ if user_query:
             ):
                 etype = event.get("event")
                 if etype == "sources":
-                    sources_buffer = event.get("data", "")
+                    sources_buffer += (event.get("data") or "")
                     status_box.update(label="Generating answer...", state="running")
                 elif etype == "token":
                     if ttft is None:
