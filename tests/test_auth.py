@@ -1,11 +1,9 @@
-"""Tests for the bcrypt-based auth module + legacy hash migration."""
+"""Tests for bcrypt-based auth + legacy hash migration."""
 from __future__ import annotations
 
 import hashlib
-import os
 import sqlite3
 import sys
-from pathlib import Path
 
 import pytest
 
@@ -14,10 +12,12 @@ import pytest
 def fresh_db(tmp_path, monkeypatch):
     db_path = tmp_path / "user.db"
     monkeypatch.setenv("USER_DB_PATH", str(db_path))
-    # Force re-import so config picks up the new path
-    for mod in ("auth", "config"):
+    for mod in ("services.auth", "services.config"):
         sys.modules.pop(mod, None)
-    import auth  # noqa: WPS433
+    import importlib
+
+    importlib.import_module("services.config")
+    auth = importlib.import_module("services.auth")
 
     auth.create_users_table()
     auth.create_chat_table()
@@ -68,7 +68,7 @@ def test_legacy_sha256_migrates_on_login(fresh_db):
         new_hash = conn.execute(
             "SELECT password FROM users WHERE username = ?", ("dave",)
         ).fetchone()[0]
-    assert new_hash.startswith("$2")  # bcrypt prefix
+    assert new_hash.startswith("$2")
 
 
 def test_chat_history_roundtrip(fresh_db):

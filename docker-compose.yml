@@ -1,4 +1,19 @@
 services:
+  qdrant:
+    image: qdrant/qdrant:v1.11.0
+    container_name: deepcampus_qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:6333/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+
   ollama:
     image: ollama/ollama:latest
     container_name: deepcampus_ollama
@@ -20,31 +35,43 @@ services:
               count: all
               capabilities: [gpu]
 
-  app:
-    build: .
-    container_name: deepcampus_app
+  backend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.backend
+    container_name: deepcampus_backend
     ports:
-      - "8501:8501"
+      - "8000:8000"
     volumes:
-      # Persist data via directory bind-mounts only — never bind-mount a single
-      # file that may not exist on the host (Docker would create it as a dir).
       - ./docs:/app/docs
-      - ./chroma_db:/app/chroma_db
       - ./docs_images:/app/docs_images
       - ./data:/app/data
+      - hf_cache:/root/.cache/huggingface
     environment:
       - OLLAMA_HOST=http://ollama:11434
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
       - USER_DB_PATH=/app/data/user.db
       - INGEST_STATE_PATH=/app/data/ingest_state.json
+      - DOCS_PATH=/app/docs
+      - DOCS_IMAGES_PATH=/app/docs_images
+      - EMBED_CACHE_PATH=/app/data/embed_cache
+      - LOG_LEVEL=INFO
+      # Override these in .env for production
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
+      - JWT_SECRET=${JWT_SECRET:-change-me-in-production-please}
     depends_on:
+      qdrant:
+        condition: service_healthy
       ollama:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O- http://localhost:8501/_stcore/health || exit 1"]
-      interval: 30s
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 15s
       timeout: 5s
-      retries: 5
-      start_period: 60s
+      retries: 8
+      start_period: 90s
     deploy:
       resources:
         reservations:
@@ -53,5 +80,26 @@ services:
               count: all
               capabilities: [gpu]
 
+  frontend:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.frontend
+    container_name: deepcampus_frontend
+    ports:
+      - "8501:8501"
+    environment:
+      - BACKEND_URL=http://backend:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8501/_stcore/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
 volumes:
+  qdrant_data:
   ollama_data:
+  hf_cache:
