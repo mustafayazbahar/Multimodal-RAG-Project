@@ -12,5 +12,9 @@ RUN pip install --no-cache-dir -r requirements.frontend.txt
 
 COPY frontend/ ./frontend/
 
+# Streamlit looks for ./.streamlit/config.toml in the working directory.
+# Mirror our themed config there so CMD picks it up.
+RUN cp -r /app/frontend/.streamlit /app/.streamlit
+
 EXPOSE 8501
 CMD ["streamlit", "run", "frontend/app.py", "--server.port=8501", "--server.address=0.0.0.0"]
