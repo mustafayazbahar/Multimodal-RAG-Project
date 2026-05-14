@@ -205,24 +205,6 @@ When a user asks a question:
 
 ---
 
-## 🐛 Known Limitations & Roadmap
-
-### Current Limitations
-- LLM responses are not streamed (full response appears at once)
-- Single-GPU only (Moondream + Llama share one device)
-- Image retrieval limited to 1 image per response
-- No document deletion UI (manual file removal required)
-
-### Roadmap
-- [ ] **Streaming responses** via Ollama streaming API
-- [ ] **Document management UI** (upload, delete, view metadata)
-- [ ] **Multi-GPU support** (separate devices for VLM and LLM)
-- [ ] **Reranking** with cross-encoder for improved retrieval quality
-- [ ] **Conversation memory** with LangChain Memory modules
-- [ ] **Citation highlighting** — highlight exact page passages
-
----
-
 ## 🤝 Contributing
 
 Pull requests are welcome. For major changes, please open an issue first to discuss what you would like to change.
