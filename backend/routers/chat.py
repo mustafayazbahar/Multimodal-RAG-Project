@@ -48,14 +48,28 @@ def get_history(user: Annotated[CurrentUser, Depends(get_current_user)]) -> Chat
 def delete_history(user: Annotated[CurrentUser, Depends(get_current_user)]) -> None:
     clear_chat_history(user.username)
 
+def _model_is_pulled(target: str, pulled: list[str]) -> bool:
+    """Tag-agnostic membership: 'llama3' matches 'llama3:latest' and vice versa."""
+    if target in pulled:
+        return True
+    target_base = target.split(":", 1)[0]
+    for p in pulled:
+        if p == target_base:
+            return True
+        if p.split(":", 1)[0] == target_base:
+            return True
+    return False
+
+
+
 
 @router.get("/models", response_model=ModelListResponse)
 def get_models(_: Annotated[CurrentUser, Depends(get_current_user)]) -> ModelListResponse:
     """Return which LLMs are pulled vs. configured-but-not-yet-pulled."""
     pulled = list_pulled_models()
     configured = list_available_models()
-    pullable = [m for m in configured if m not in pulled]
-    default = settings.models.llm_model if settings.models.llm_model in pulled \
+    pullable = [m for m in configured if not _model_is_pulled(m, pulled)]
+    default = settings.models.llm_model if _model_is_pulled(settings.models.llm_model, pulled) \
         else (pulled[0] if pulled else settings.models.llm_model)
     return ModelListResponse(available=pulled, pullable=pullable, default=default)
 
