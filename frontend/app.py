@@ -338,8 +338,13 @@ def _render_messages() -> None:
                     with st.expander("View sources", expanded=False):
                         source_cards(msg["sources"])
                 for img_path in (msg.get("images") or []):
-                    if img_path:
-                        st.image(api.fetch_image_url(img_path), use_container_width=True)
+                    	if not img_path:
+                        	continue
+                   		blob = api.fetch_image_bytes(st.session_state.token, img_path)
+                   		if blob:
+                       			 st.image(blob, use_container_width=True)
+                   		else:
+                       			 st.caption(f"Image unavailable: {img_path}")
 
 
 SUGGESTIONS = [
@@ -432,8 +437,13 @@ if user_query:
                 with st.expander("View sources", expanded=False):
                     source_cards(sources_buffer)
             for img_path in images_buffer:
-                if img_path:
-                    st.image(api.fetch_image_url(img_path), use_container_width=True)
+                if not img_path:
+                    continue
+                blob = api.fetch_image_bytes(st.session_state.token, img_path)
+                if blob:
+                    st.image(blob, use_container_width=True)
+                else:
+                    st.caption(f"Image unavailable: {img_path}"))
 
             st.session_state.messages.append(
                 {

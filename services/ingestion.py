@@ -65,6 +65,8 @@ def _is_duplicate_against_state(fp, state: dict) -> tuple[bool, str]:
             return True, f"file-hash matches '{filename}'"
         if fp.content_hash and entry.get("content_hash") == fp.content_hash:
             return True, f"content matches '{filename}'"
+        if fp.metadata_hash and entry.get("metadata_hash") == fp.metadata_hash:
+            return True, f"same title/author as '{filename}'"
     return False, ""
 
 
@@ -308,4 +310,5 @@ def run_ingestion() -> dict:
 
 
 if __name__ == "__main__":
-    run_ingestion()
+    summary = run_ingestion()
+    print("INGESTION_RESULT:" + json.dumps(summary), flush=True)
