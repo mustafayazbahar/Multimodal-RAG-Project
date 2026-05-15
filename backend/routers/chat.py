@@ -15,11 +15,19 @@ from backend.schemas import (
     ChatMessage,
     ChatQueryRequest,
     ModelListResponse,
+    PullModelRequest,
 )
 from backend.security import CurrentUser, get_current_user
 from services.auth import clear_chat_history, load_chat_history, save_message
 from services.config import settings
-from services.llm import benchmark_models, list_available_models, render_prompt, stream_chat
+from services.llm import (
+    benchmark_models,
+    list_available_models,
+    list_pulled_models,
+    pull_model,
+    render_prompt,
+    stream_chat,
+)
 from services.logging_config import get_logger
 from services.retriever import build_context, hybrid_search
 
@@ -43,10 +51,33 @@ def delete_history(user: Annotated[CurrentUser, Depends(get_current_user)]) -> N
 
 @router.get("/models", response_model=ModelListResponse)
 def get_models(_: Annotated[CurrentUser, Depends(get_current_user)]) -> ModelListResponse:
-    return ModelListResponse(
-        available=list_available_models(),
-        default=settings.models.llm_model,
-    )
+    """Return which LLMs are pulled vs. configured-but-not-yet-pulled."""
+    pulled = list_pulled_models()
+    configured = list_available_models()
+    pullable = [m for m in configured if m not in pulled]
+    default = settings.models.llm_model if settings.models.llm_model in pulled \
+        else (pulled[0] if pulled else settings.models.llm_model)
+    return ModelListResponse(available=pulled, pullable=pullable, default=default)
+
+
+@router.post("/models/pull")
+def trigger_pull(
+    payload: PullModelRequest,
+    user: Annotated[CurrentUser, Depends(get_current_user)],
+):
+    """Stream Ollama pull progress for the requested model (instructor only)."""
+    if user.role != "instructor":
+        raise HTTPException(status_code=403, detail="Instructor role required")
+
+    def event_stream():
+        try:
+            for evt in pull_model(payload.model):
+                yield json.dumps(evt) + "\n"
+        except Exception as exc:  # noqa: BLE001
+            log.exception("Pull failed for %s", payload.model)
+            yield json.dumps({"error": str(exc)}) + "\n"
+
+    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
 
 
 @router.post("/query")

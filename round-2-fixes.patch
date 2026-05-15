@@ -1,0 +1,509 @@
+From 4f32d91c941f3c6a3d9055bf934a3fa20ba24f16 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 15 May 2026 13:21:28 +0000
+Subject: [PATCH] fix(stack): peft dep + cookie hydration + model UX + Enter
+ key
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+ingestion / deps
+- requirements.backend: pin peft (FlagEmbedding 1.2's flag_reranker
+  imports it unconditionally even when no reranker is loaded — without
+  it BGE-M3 init explodes with ModuleNotFoundError).
+session
+- frontend/session.py: serialize cookie value as JSON (dict round-trip
+  via extra-streamlit-components was producing '[object Object]' on
+  some browsers) and add a short rerun-retry loop so the iframe gets a
+  few hundred ms to push browser cookies into Python before we conclude
+  there is no session. Fixes 'logged out on refresh'.
+model selection
+- services/llm: list_pulled_models() reads /api/tags from Ollama;
+  pull_model() streams /api/pull progress so the UI can show it.
+- backend /chat/models now returns {available, pullable, default}
+  where 'available' is what's actually loaded in Ollama and 'pullable'
+  is configured-but-missing.
+- POST /chat/models/pull triggers a pull (instructor only) and streams
+  Ollama's progress events back as NDJSON.
+- Frontend sidebar: dropdown shows only pulled models; a "Download
+  more models" expander lets instructors pull missing ones with a
+  live progress display, then auto-refreshes the list.
+login UX
+- frontend/styles.py: bind_login_enter() injects a one-shot JS that
+  attaches a keydown listener to every password input. Pressing Enter
+  finds the form's primary submit button and clicks it explicitly,
+  working around Streamlit 1.57's form-submit drop when iframe widgets
+  are on the page. Idempotent via a data-attribute guard.
+- frontend/app.py calls bind_login_enter() at the bottom of the auth
+  page so the listener is installed every time the form is rendered.
+---
+ backend/routers/chat.py  | 41 ++++++++++++++++++++---
+ backend/schemas.py       |  7 +++-
+ frontend/api_client.py   | 24 ++++++++++++++
+ frontend/app.py          | 65 +++++++++++++++++++++++++++++-------
+ frontend/session.py      | 71 ++++++++++++++++++++++++++++++----------
+ frontend/styles.py       | 39 ++++++++++++++++++++++
+ requirements.backend.txt |  3 ++
+ services/llm.py          | 39 ++++++++++++++++++++++
+ 8 files changed, 254 insertions(+), 35 deletions(-)
+diff --git a/backend/routers/chat.py b/backend/routers/chat.py
+index bfc807e..46e10ab 100644
+--- a/backend/routers/chat.py
++++ b/backend/routers/chat.py
+@@ -15,11 +15,19 @@ from backend.schemas import (
+     ChatMessage,
+     ChatQueryRequest,
+     ModelListResponse,
++    PullModelRequest,
+ )
+ from backend.security import CurrentUser, get_current_user
+ from services.auth import clear_chat_history, load_chat_history, save_message
+ from services.config import settings
+-from services.llm import benchmark_models, list_available_models, render_prompt, stream_chat
++from services.llm import (
++    benchmark_models,
++    list_available_models,
++    list_pulled_models,
++    pull_model,
++    render_prompt,
++    stream_chat,
++)
+ from services.logging_config import get_logger
+ from services.retriever import build_context, hybrid_search
+ 
+@@ -43,10 +51,33 @@ def delete_history(user: Annotated[CurrentUser, Depends(get_current_user)]) -> N
+ 
+ @router.get("/models", response_model=ModelListResponse)
+ def get_models(_: Annotated[CurrentUser, Depends(get_current_user)]) -> ModelListResponse:
+-    return ModelListResponse(
+-        available=list_available_models(),
+-        default=settings.models.llm_model,
+-    )
++    """Return which LLMs are pulled vs. configured-but-not-yet-pulled."""
++    pulled = list_pulled_models()
++    configured = list_available_models()
++    pullable = [m for m in configured if m not in pulled]
++    default = settings.models.llm_model if settings.models.llm_model in pulled \
++        else (pulled[0] if pulled else settings.models.llm_model)
++    return ModelListResponse(available=pulled, pullable=pullable, default=default)
++
++
++@router.post("/models/pull")
++def trigger_pull(
++    payload: PullModelRequest,
++    user: Annotated[CurrentUser, Depends(get_current_user)],
++):
++    """Stream Ollama pull progress for the requested model (instructor only)."""
++    if user.role != "instructor":
++        raise HTTPException(status_code=403, detail="Instructor role required")
++
++    def event_stream():
++        try:
++            for evt in pull_model(payload.model):
++                yield json.dumps(evt) + "\n"
++        except Exception as exc:  # noqa: BLE001
++            log.exception("Pull failed for %s", payload.model)
++            yield json.dumps({"error": str(exc)}) + "\n"
++
++    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
+ 
+ 
+ @router.post("/query")
+diff --git a/backend/schemas.py b/backend/schemas.py
+index a4b57d0..109a042 100644
+--- a/backend/schemas.py
++++ b/backend/schemas.py
+@@ -56,10 +56,15 @@ class IngestRunResponse(BaseModel):
+ 
+ 
+ class ModelListResponse(BaseModel):
+-    available: list[str]
++    available: list[str]   # actually pulled in Ollama (ready to use)
++    pullable: list[str]    # configured in AVAILABLE_LLMS but not pulled yet
+     default: str
+ 
+ 
++class PullModelRequest(BaseModel):
++    model: str
++
++
+ class BenchmarkRequest(BaseModel):
+     prompt: str
+     models: Optional[list[str]] = None
+diff --git a/frontend/api_client.py b/frontend/api_client.py
+index a129849..25d7b21 100644
+--- a/frontend/api_client.py
++++ b/frontend/api_client.py
+@@ -63,6 +63,30 @@ def list_models(token: str) -> dict:
+     return resp.json()
+ 
+ 
++def pull_model(token: str, model: str) -> Iterator[dict]:
++    """Stream pull-progress events from the backend."""
++    with requests.post(
++        f"{BACKEND_URL}/chat/models/pull",
++        json={"model": model},
++        headers=_headers(token),
++        stream=True,
++        timeout=None,
++    ) as resp:
++        if resp.status_code != 200:
++            try:
++                detail = resp.json().get("detail", "")
++            except json.JSONDecodeError:
++                detail = resp.text
++            raise ApiError(f"Pull failed: {detail}")
++        for line in resp.iter_lines():
++            if not line:
++                continue
++            try:
++                yield json.loads(line)
++            except json.JSONDecodeError:
++                continue
++
++
+ def stream_query(
+     token: str,
+     query: str,
+diff --git a/frontend/app.py b/frontend/app.py
+index 38372e0..be588fe 100644
+--- a/frontend/app.py
++++ b/frontend/app.py
+@@ -28,7 +28,12 @@ from frontend.components import (
+     timestamp_now,
+     welcome_screen,
+ )
+-from frontend.styles import autofocus_chat_input, inject_styles, scroll_to_bottom
++from frontend.styles import (
++    autofocus_chat_input,
++    bind_login_enter,
++    inject_styles,
++    scroll_to_bottom,
++)
+ 
+ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+ 
+@@ -54,6 +59,7 @@ for k, v in {
+     "rerank_n": 8,
+     "dense_weight": 0.6,
+     "selected_model": None,
++    "pullable_models": [],
+     "available_models": [],
+     "last_query_at": None,
+     "pending_query": None,
+@@ -79,6 +85,7 @@ def _refresh_models_and_history() -> None:
+     try:
+         info = api.list_models(st.session_state.token)
+         st.session_state.available_models = info.get("available", [])
++        st.session_state.pullable_models = info.get("pullable", [])
+         if not st.session_state.selected_model:
+             st.session_state.selected_model = info.get("default")
+     except api.ApiError:
+@@ -139,6 +146,7 @@ if not _logged_in():
+ 
+         if mode == "Sign in":
+             st.caption("Default admin: `admin / admin123` — change in `.env` before production.")
++        bind_login_enter()
+     st.stop()
+ 
+ 
+@@ -167,23 +175,58 @@ with st.sidebar:
+ 
+     st.divider()
+     sidebar_section_title("Model")
+-    if not st.session_state.available_models:
++    if not st.session_state.available_models and not st.session_state.get("pullable_models"):
+         _refresh_models_and_history()
+-    if st.session_state.available_models:
+-        current = st.session_state.selected_model or st.session_state.available_models[0]
+-        idx = (
+-            st.session_state.available_models.index(current)
+-            if current in st.session_state.available_models else 0
+-        )
++
++    pulled = st.session_state.available_models or []
++    pullable = st.session_state.get("pullable_models") or []
++
++    if pulled:
++        current = st.session_state.selected_model or pulled[0]
++        idx = pulled.index(current) if current in pulled else 0
+         st.session_state.selected_model = st.selectbox(
+             "Active LLM",
+-            st.session_state.available_models,
++            pulled,
+             index=idx,
+             help=(
+-                "Choose which local LLM (served via Ollama) answers your queries. "
+-                "Switching may take 2–3 s while Ollama evicts the previous model."
++                "Models actually loaded in Ollama. Switching may take 2–3 s "
++                "while Ollama evicts the previous one."
+             ),
+         )
++    else:
++        st.warning("No LLM is pulled yet. Pick one below and click Download.")
++
++    if pullable and st.session_state.role == "instructor":
++        with st.expander("Download more models", expanded=not pulled):
++            to_pull = st.selectbox(
++                "Model to download",
++                pullable,
++                key="pull_choice",
++                help="Models configured in AVAILABLE_LLMS but not yet in Ollama.",
++            )
++            if st.button("Download", key="pull_btn", use_container_width=True):
++                status = st.status(f"Downloading {to_pull}…", expanded=True)
++                progress_text = st.empty()
++                last_status = ""
++                try:
++                    for evt in api.pull_model(st.session_state.token, to_pull):
++                        msg = evt.get("status") or evt.get("error") or ""
++                        if msg and msg != last_status:
++                            progress_text.markdown(f"`{msg}`")
++                            last_status = msg
++                        if "error" in evt:
++                            status.update(label=f"Failed: {evt['error']}", state="error")
++                            break
++                    else:
++                        status.update(
++                            label=f"Downloaded {to_pull}",
++                            state="complete",
++                            expanded=False,
++                        )
++                        _refresh_models_and_history()
++                        st.rerun()
++                except api.ApiError as exc:
++                    status.update(label=f"Failed: {exc}", state="error")
+ 
+     sidebar_section_title("Retrieval")
+     st.session_state.temperature = st.slider(
+diff --git a/frontend/session.py b/frontend/session.py
+index c2b14be..af0ca69 100644
+--- a/frontend/session.py
++++ b/frontend/session.py
+@@ -4,16 +4,21 @@ Streamlit's session state is wiped on full page refresh. We store the JWT in
+ an HTTP cookie (via extra-streamlit-components) so a refresh keeps the user
+ logged in until the token expires.
+ 
+-Cookie attributes:
+-- max_age = JWT TTL (default 12h)
+-- The cookie is *not* httpOnly (extra-streamlit-components reads from JS).
+-  That's acceptable for this app because the backend treats the JWT as a
+-  bearer token; we mitigate XSS with strict CSP on the backend and by not
+-  rendering user-controlled HTML.
++Two quirks worked around here:
++- The custom-component iframe needs at least one rerun after page load to
++  push browser cookies into Python. The first script run reports "no
++  cookie" even when one exists. hydrate_from_cookie therefore retries via
++  st.rerun up to RETRY_BUDGET times before giving up.
++- extra-streamlit-components serializes the cookie value with json.dumps
++  but only does so for primitive scalars cleanly. Passing a dict has
++  produced "[object Object]" in the past. We explicitly json.dumps on
++  save and json.loads on load so the round-trip is deterministic.
+ """
+ from __future__ import annotations
+ 
++import json
+ import os
++import time
+ from datetime import datetime, timedelta, timezone
+ 
+ import extra_streamlit_components as stx
+@@ -21,6 +26,8 @@ import streamlit as st
+ 
+ COOKIE_NAME = "dc_session"
+ COOKIE_TTL_HOURS = int(os.getenv("JWT_TTL_HOURS", "12"))
++RETRY_BUDGET = 3
++RETRY_DELAY_S = 0.25
+ 
+ 
+ def _cookie_manager() -> stx.CookieManager:
+@@ -39,23 +46,40 @@ def _cookie_manager() -> stx.CookieManager:
+     return st.session_state["_dc_cookie_manager"]
+ 
+ 
++def _decode(raw: object) -> dict | None:
++    """Best-effort parser: handles json strings, plain dicts, and junk."""
++    if raw is None or raw == "":
++        return None
++    if isinstance(raw, dict):
++        data = raw
++    elif isinstance(raw, str):
++        try:
++            data = json.loads(raw)
++        except json.JSONDecodeError:
++            return None
++    else:
++        return None
++    if not isinstance(data, dict):
++        return None
++    if not all(k in data for k in ("token", "username", "role")):
++        return None
++    return data
++
++
+ def load_cookie() -> dict | None:
+-    """Read the session cookie (returns dict with token/username/role or None)."""
++    """Read the session cookie. Returns None if missing or malformed."""
+     cm = _cookie_manager()
+     raw = cm.get(cookie=COOKIE_NAME)
+-    if not raw or not isinstance(raw, dict):
+-        return None
+-    if not all(k in raw for k in ("token", "username", "role")):
+-        return None
+-    return raw
++    return _decode(raw)
+ 
+ 
+ def save_cookie(token: str, username: str, role: str) -> None:
+     cm = _cookie_manager()
+     expires_at = datetime.now(timezone.utc) + timedelta(hours=COOKIE_TTL_HOURS)
++    payload = json.dumps({"token": token, "username": username, "role": role})
+     cm.set(
+         COOKIE_NAME,
+-        {"token": token, "username": username, "role": role},
++        payload,
+         expires_at=expires_at,
+         key="dc_cookie_set",
+     )
+@@ -73,13 +97,24 @@ def clear_cookie() -> None:
+ def hydrate_from_cookie() -> None:
+     """If the session is empty but a valid cookie exists, restore it.
+ 
+-    Called once on every page load — keeps the user logged in across refreshes.
++    Called once on every page load. The first call after a page refresh
++    often sees an empty cookie because the iframe hasn't pushed its
++    state to Python yet — we trigger a few short reruns to give it a
++    chance before falling back to the login screen.
+     """
+     if st.session_state.get("token"):
+         return
++
+     cookie = load_cookie()
+-    if not cookie:
++    if cookie:
++        st.session_state.token = cookie["token"]
++        st.session_state.username = cookie["username"]
++        st.session_state.role = cookie["role"]
++        st.session_state["_cookie_attempts"] = 0
+         return
+-    st.session_state.token = cookie["token"]
+-    st.session_state.username = cookie["username"]
+-    st.session_state.role = cookie["role"]
++
++    attempts = st.session_state.get("_cookie_attempts", 0)
++    if attempts < RETRY_BUDGET:
++        st.session_state["_cookie_attempts"] = attempts + 1
++        time.sleep(RETRY_DELAY_S)
++        st.rerun()
+diff --git a/frontend/styles.py b/frontend/styles.py
+index 8553675..4519346 100644
+--- a/frontend/styles.py
++++ b/frontend/styles.py
+@@ -342,3 +342,42 @@ def autofocus_chat_input() -> None:
+         """,
+         height=0,
+     )
++
++
++def bind_login_enter() -> None:
++    """Force Enter-in-password-field to click the primary submit button.
++
++    Streamlit 1.57's st.form sometimes drops the Enter keystroke when
++    iframe components are on the page. We attach an explicit listener to
++    every password input that finds the form's submit button and clicks
++    it. Idempotent: the listener self-deduplicates via a data attribute.
++    """
++    st.components.v1.html(
++        """
++        <script>
++          const attach = () => {
++            const doc = window.parent.document;
++            const inputs = doc.querySelectorAll('input[type="password"]');
++            inputs.forEach((inp) => {
++              if (inp.dataset.dcEnterBound === '1') return;
++              inp.dataset.dcEnterBound = '1';
++              inp.addEventListener('keydown', (ev) => {
++                if (ev.key !== 'Enter' || ev.isComposing) return;
++                ev.preventDefault();
++                const form = inp.closest('[data-testid="stForm"]');
++                const btn = (form || doc).querySelector(
++                  'button[kind="primaryFormSubmit"], button[kind="secondaryFormSubmit"]'
++                );
++                if (btn) btn.click();
++              });
++            });
++          };
++          attach();
++          // Streamlit re-renders inputs; re-attach on DOM mutations.
++          const obs = new MutationObserver(attach);
++          obs.observe(window.parent.document.body, {childList: true, subtree: true});
++          setTimeout(() => obs.disconnect(), 5000);
++        </script>
++        """,
++        height=0,
++    )
+diff --git a/requirements.backend.txt b/requirements.backend.txt
+index d400729..eb46702 100644
+--- a/requirements.backend.txt
++++ b/requirements.backend.txt
+@@ -28,6 +28,9 @@ qdrant-client>=1.9,<2.0
+ # AutoModel constructors, which the pinned transformers 4.44.2 rejects
+ # (the `dtype` alias for `torch_dtype` only landed in transformers 4.50).
+ FlagEmbedding>=1.2.10,<1.3
++# peft is imported unconditionally by FlagEmbedding 1.2's flag_reranker
++# module, even when we never load a reranker — bundle it explicitly.
++peft>=0.10,<1.0
+ transformers==4.44.2
+ sentence-transformers>=3.0,<4.0
+ einops>=0.7,<1.0
+diff --git a/services/llm.py b/services/llm.py
+index 231eb98..f0b9172 100644
+--- a/services/llm.py
++++ b/services/llm.py
+@@ -30,6 +30,45 @@ def list_available_models() -> list[str]:
+     return [m.strip() for m in settings.models.available_llms if m.strip()]
+ 
+ 
++def list_pulled_models(host: str | None = None) -> list[str]:
++    """Models actually present in the local Ollama instance.
++
++    Returns the names exactly as Ollama reports them (tag included).
++    On error returns an empty list — callers should fall back to
++    list_available_models() so the UI is never blank.
++    """
++    base = (host or settings.models.ollama_host).rstrip("/")
++    try:
++        resp = requests.get(f"{base}/api/tags", timeout=5)
++        resp.raise_for_status()
++        data = resp.json()
++    except (requests.RequestException, ValueError) as exc:
++        log.warning("Could not list pulled models: %s", exc)
++        return []
++    return [m["name"] for m in (data.get("models") or []) if m.get("name")]
++
++
++def pull_model(model: str, host: str | None = None) -> Iterator[dict]:
++    """Stream Ollama's /api/pull progress events for the given model."""
++    import json
++
++    base = (host or settings.models.ollama_host).rstrip("/")
++    with requests.post(
++        f"{base}/api/pull",
++        json={"model": model, "stream": True},
++        stream=True,
++        timeout=None,
++    ) as resp:
++        resp.raise_for_status()
++        for line in resp.iter_lines():
++            if not line:
++                continue
++            try:
++                yield json.loads(line)
++            except json.JSONDecodeError:
++                continue
++
++
+ def evict_model(model: str, host: str | None = None) -> None:
+     """Ask Ollama to drop the model from VRAM (keep_alive=0)."""
+     base = (host or settings.models.ollama_host).rstrip("/")
+-- 
+2.43.0

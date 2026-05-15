@@ -24,7 +24,13 @@ langchain-text-splitters>=0.3,<0.4
 qdrant-client>=1.9,<2.0
 
 # --- Embeddings (BGE-M3 via FlagEmbedding) ---
+# Pin to 1.2.x: 1.3.x's unified runner passes `dtype=` straight to
+# AutoModel constructors, which the pinned transformers 4.44.2 rejects
+# (the `dtype` alias for `torch_dtype` only landed in transformers 4.50).
 FlagEmbedding>=1.2.10,<1.3
+# peft is imported unconditionally by FlagEmbedding 1.2's flag_reranker
+# module, even when we never load a reranker — bundle it explicitly.
+peft>=0.10,<1.0
 transformers==4.44.2
 sentence-transformers>=3.0,<4.0
 einops>=0.7,<1.0

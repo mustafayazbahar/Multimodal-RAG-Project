@@ -342,3 +342,42 @@ def autofocus_chat_input() -> None:
         """,
         height=0,
     )
+
+
+def bind_login_enter() -> None:
+    """Force Enter-in-password-field to click the primary submit button.
+
+    Streamlit 1.57's st.form sometimes drops the Enter keystroke when
+    iframe components are on the page. We attach an explicit listener to
+    every password input that finds the form's submit button and clicks
+    it. Idempotent: the listener self-deduplicates via a data attribute.
+    """
+    st.components.v1.html(
+        """
+        <script>
+          const attach = () => {
+            const doc = window.parent.document;
+            const inputs = doc.querySelectorAll('input[type="password"]');
+            inputs.forEach((inp) => {
+              if (inp.dataset.dcEnterBound === '1') return;
+              inp.dataset.dcEnterBound = '1';
+              inp.addEventListener('keydown', (ev) => {
+                if (ev.key !== 'Enter' || ev.isComposing) return;
+                ev.preventDefault();
+                const form = inp.closest('[data-testid="stForm"]');
+                const btn = (form || doc).querySelector(
+                  'button[kind="primaryFormSubmit"], button[kind="secondaryFormSubmit"]'
+                );
+                if (btn) btn.click();
+              });
+            });
+          };
+          attach();
+          // Streamlit re-renders inputs; re-attach on DOM mutations.
+          const obs = new MutationObserver(attach);
+          obs.observe(window.parent.document.body, {childList: true, subtree: true});
+          setTimeout(() => obs.disconnect(), 5000);
+        </script>
+        """,
+        height=0,
+    )
