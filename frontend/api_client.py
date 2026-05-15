@@ -146,6 +146,14 @@ def run_ingest(token: str) -> dict:
     return resp.json()
 
 
-def fetch_image_url(image_path: str) -> str:
-    """Return the backend URL to fetch a given image path."""
-    return f"{BACKEND_URL}/ingest/image?path={requests.utils.quote(image_path)}"
+def fetch_image_bytes(token: str, image_path: str) -> bytes | None:
+    """Download an image through the backend."""
+    resp = requests.get(
+        f"{BACKEND_URL}/ingest/image",
+        params={"path": image_path},
+        headers=_headers(token),
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        return None
+    return resp.content

@@ -337,10 +337,6 @@ def _render_messages() -> None:
                 if msg.get("sources"):
                     with st.expander("View sources", expanded=False):
                         source_cards(msg["sources"])
-                for img_path in (msg.get("images") or []):
-                    if img_path:
-                        st.image(api.fetch_image_url(img_path), use_container_width=True)
-
 
 SUGGESTIONS = [
     "Summarize the main contributions of the indexed papers.",
@@ -431,10 +427,6 @@ if user_query:
             if sources_buffer:
                 with st.expander("View sources", expanded=False):
                     source_cards(sources_buffer)
-            for img_path in images_buffer:
-                if img_path:
-                    st.image(api.fetch_image_url(img_path), use_container_width=True)
-
             st.session_state.messages.append(
                 {
                     "role": "assistant",
