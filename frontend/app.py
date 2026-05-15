@@ -337,15 +337,6 @@ def _render_messages() -> None:
                 if msg.get("sources"):
                     with st.expander("View sources", expanded=False):
                         source_cards(msg["sources"])
-                for img_path in (msg.get("images") or []):
-                    	if not img_path:
-                        	continue
-                   		blob = api.fetch_image_bytes(st.session_state.token, img_path)
-                   		if blob:
-                       			 st.image(blob, use_container_width=True)
-                   		else:
-                       			 st.caption(f"Image unavailable: {img_path}")
-
 
 SUGGESTIONS = [
     "Summarize the main contributions of the indexed papers.",
@@ -436,15 +427,6 @@ if user_query:
             if sources_buffer:
                 with st.expander("View sources", expanded=False):
                     source_cards(sources_buffer)
-            for img_path in images_buffer:
-                if not img_path:
-                    continue
-                blob = api.fetch_image_bytes(st.session_state.token, img_path)
-                if blob:
-                    st.image(blob, use_container_width=True)
-                else:
-                    st.caption(f"Image unavailable: {img_path}"))
-
             st.session_state.messages.append(
                 {
                     "role": "assistant",

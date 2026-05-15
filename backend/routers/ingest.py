@@ -74,14 +74,10 @@ def upload_pdf(
     return {"saved_as": safe_name, "bytes": len(contents)}
 
 
-
-
-
 _INGEST_RESULT_MARKER = "INGESTION_RESULT:"
 
 
-def _parse_ingest_summary(stdout: str) -> dict | None:
-    """Find the last INGESTION_RESULT line in subprocess output and parse it."""
+def _parse_ingest_summary(stdout):
     for line in reversed(stdout.splitlines()):
         idx = line.find(_INGEST_RESULT_MARKER)
         if idx == -1:
@@ -90,18 +86,13 @@ def _parse_ingest_summary(stdout: str) -> dict | None:
         try:
             return json.loads(payload)
         except json.JSONDecodeError:
-            log.warning("Could not parse ingest summary line: %s", payload[:200])
             return None
     return None
 
 
 @router.post("/run", response_model=IngestRunResponse)
 def run_ingest(_: Annotated[CurrentUser, Depends(require_instructor)]) -> IngestRunResponse:
-    """Evict LLM from VRAM, then run the ingestion pipeline as a subprocess.
-
-    Running in a subprocess isolates heavy GPU work and guarantees the parent
-    API process stays responsive (and releases all model VRAM on exit).
-    """
+    """Run the ingestion pipeline as a subprocess."""
     evict_model(settings.models.llm_model)
     try:
         result = subprocess.run(
@@ -118,10 +109,8 @@ def run_ingest(_: Annotated[CurrentUser, Depends(require_instructor)]) -> Ingest
         log.error("Ingestion subprocess failed: %s", result.stderr[-2000:])
         raise HTTPException(status_code=500, detail=result.stderr[-1000:] or "Ingestion failed")
 
-    # The subprocess prints a final JSON summary; if absent we fall back to a
-    # status query.
-        summary = _parse_ingest_summary(result.stdout) or {}
-   	    return IngestRunResponse(
+    summary = _parse_ingest_summary(result.stdout) or {}
+    return IngestRunResponse(
         processed=summary.get("processed", 0),
         skipped=summary.get("skipped", 0),
         duplicates=summary.get("duplicates", 0),
@@ -132,10 +121,7 @@ def run_ingest(_: Annotated[CurrentUser, Depends(require_instructor)]) -> Ingest
 
 
 @router.get("/image")
-def get_image(
-    path: str,
-    _: CurrentUser = Depends(get_current_user),
-) -> FileResponse:
+def get_image(path: str, _: CurrentUser = Depends(get_current_user)) -> FileResponse:
     """Serve an extracted image, restricted to the docs_images dir."""
     abs_path = Path(path).resolve()
     base = settings.paths.docs_images.resolve()
