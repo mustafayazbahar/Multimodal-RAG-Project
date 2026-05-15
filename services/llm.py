@@ -30,6 +30,45 @@ def list_available_models() -> list[str]:
     return [m.strip() for m in settings.models.available_llms if m.strip()]
 
 
+def list_pulled_models(host: str | None = None) -> list[str]:
+    """Models actually present in the local Ollama instance.
+
+    Returns the names exactly as Ollama reports them (tag included).
+    On error returns an empty list — callers should fall back to
+    list_available_models() so the UI is never blank.
+    """
+    base = (host or settings.models.ollama_host).rstrip("/")
+    try:
+        resp = requests.get(f"{base}/api/tags", timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+    except (requests.RequestException, ValueError) as exc:
+        log.warning("Could not list pulled models: %s", exc)
+        return []
+    return [m["name"] for m in (data.get("models") or []) if m.get("name")]
+
+
+def pull_model(model: str, host: str | None = None) -> Iterator[dict]:
+    """Stream Ollama's /api/pull progress events for the given model."""
+    import json
+
+    base = (host or settings.models.ollama_host).rstrip("/")
+    with requests.post(
+        f"{base}/api/pull",
+        json={"model": model, "stream": True},
+        stream=True,
+        timeout=None,
+    ) as resp:
+        resp.raise_for_status()
+        for line in resp.iter_lines():
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+
 def evict_model(model: str, host: str | None = None) -> None:
     """Ask Ollama to drop the model from VRAM (keep_alive=0)."""
     base = (host or settings.models.ollama_host).rstrip("/")

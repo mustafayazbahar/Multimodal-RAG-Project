@@ -56,8 +56,13 @@ class IngestRunResponse(BaseModel):
 
 
 class ModelListResponse(BaseModel):
-    available: list[str]
+    available: list[str]   # actually pulled in Ollama (ready to use)
+    pullable: list[str]    # configured in AVAILABLE_LLMS but not pulled yet
     default: str
+
+
+class PullModelRequest(BaseModel):
+    model: str
 
 
 class BenchmarkRequest(BaseModel):

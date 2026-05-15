@@ -63,6 +63,30 @@ def list_models(token: str) -> dict:
     return resp.json()
 
 
+def pull_model(token: str, model: str) -> Iterator[dict]:
+    """Stream pull-progress events from the backend."""
+    with requests.post(
+        f"{BACKEND_URL}/chat/models/pull",
+        json={"model": model},
+        headers=_headers(token),
+        stream=True,
+        timeout=None,
+    ) as resp:
+        if resp.status_code != 200:
+            try:
+                detail = resp.json().get("detail", "")
+            except json.JSONDecodeError:
+                detail = resp.text
+            raise ApiError(f"Pull failed: {detail}")
+        for line in resp.iter_lines():
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+
 def stream_query(
     token: str,
     query: str,

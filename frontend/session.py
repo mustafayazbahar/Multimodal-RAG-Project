@@ -4,16 +4,21 @@ Streamlit's session state is wiped on full page refresh. We store the JWT in
 an HTTP cookie (via extra-streamlit-components) so a refresh keeps the user
 logged in until the token expires.
 
-Cookie attributes:
-- max_age = JWT TTL (default 12h)
-- The cookie is *not* httpOnly (extra-streamlit-components reads from JS).
-  That's acceptable for this app because the backend treats the JWT as a
-  bearer token; we mitigate XSS with strict CSP on the backend and by not
-  rendering user-controlled HTML.
+Two quirks worked around here:
+- The custom-component iframe needs at least one rerun after page load to
+  push browser cookies into Python. The first script run reports "no
+  cookie" even when one exists. hydrate_from_cookie therefore retries via
+  st.rerun up to RETRY_BUDGET times before giving up.
+- extra-streamlit-components serializes the cookie value with json.dumps
+  but only does so for primitive scalars cleanly. Passing a dict has
+  produced "[object Object]" in the past. We explicitly json.dumps on
+  save and json.loads on load so the round-trip is deterministic.
 """
 from __future__ import annotations
 
+import json
 import os
+import time
 from datetime import datetime, timedelta, timezone
 
 import extra_streamlit_components as stx
@@ -21,6 +26,8 @@ import streamlit as st
 
 COOKIE_NAME = "dc_session"
 COOKIE_TTL_HOURS = int(os.getenv("JWT_TTL_HOURS", "12"))
+RETRY_BUDGET = 3
+RETRY_DELAY_S = 0.25
 
 
 def _cookie_manager() -> stx.CookieManager:
@@ -32,23 +39,40 @@ def _cookie_manager() -> stx.CookieManager:
     return st.session_state["_dc_cookie_manager"]
 
 
+def _decode(raw: object) -> dict | None:
+    """Best-effort parser: handles json strings, plain dicts, and junk."""
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, dict):
+        data = raw
+    elif isinstance(raw, str):
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+    else:
+        return None
+    if not isinstance(data, dict):
+        return None
+    if not all(k in data for k in ("token", "username", "role")):
+        return None
+    return data
+
+
 def load_cookie() -> dict | None:
-    """Read the session cookie (returns dict with token/username/role or None)."""
+    """Read the session cookie. Returns None if missing or malformed."""
     cm = _cookie_manager()
     raw = cm.get(cookie=COOKIE_NAME)
-    if not raw or not isinstance(raw, dict):
-        return None
-    if not all(k in raw for k in ("token", "username", "role")):
-        return None
-    return raw
+    return _decode(raw)
 
 
 def save_cookie(token: str, username: str, role: str) -> None:
     cm = _cookie_manager()
     expires_at = datetime.now(timezone.utc) + timedelta(hours=COOKIE_TTL_HOURS)
+    payload = json.dumps({"token": token, "username": username, "role": role})
     cm.set(
         COOKIE_NAME,
-        {"token": token, "username": username, "role": role},
+        payload,
         expires_at=expires_at,
         key="dc_cookie_set",
     )
@@ -66,13 +90,24 @@ def clear_cookie() -> None:
 def hydrate_from_cookie() -> None:
     """If the session is empty but a valid cookie exists, restore it.
 
-    Called once on every page load — keeps the user logged in across refreshes.
+    Called once on every page load. The first call after a page refresh
+    often sees an empty cookie because the iframe hasn't pushed its
+    state to Python yet — we trigger a few short reruns to give it a
+    chance before falling back to the login screen.
     """
     if st.session_state.get("token"):
         return
+
     cookie = load_cookie()
-    if not cookie:
+    if cookie:
+        st.session_state.token = cookie["token"]
+        st.session_state.username = cookie["username"]
+        st.session_state.role = cookie["role"]
+        st.session_state["_cookie_attempts"] = 0
         return
-    st.session_state.token = cookie["token"]
-    st.session_state.username = cookie["username"]
-    st.session_state.role = cookie["role"]
+
+    attempts = st.session_state.get("_cookie_attempts", 0)
+    if attempts < RETRY_BUDGET:
+        st.session_state["_cookie_attempts"] = attempts + 1
+        time.sleep(RETRY_DELAY_S)
+        st.rerun()

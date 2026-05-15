@@ -28,7 +28,12 @@ from frontend.components import (
     timestamp_now,
     welcome_screen,
 )
-from frontend.styles import autofocus_chat_input, inject_styles, scroll_to_bottom
+from frontend.styles import (
+    autofocus_chat_input,
+    bind_login_enter,
+    inject_styles,
+    scroll_to_bottom,
+)
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
@@ -54,6 +59,7 @@ for k, v in {
     "rerank_n": 8,
     "dense_weight": 0.6,
     "selected_model": None,
+    "pullable_models": [],
     "available_models": [],
     "last_query_at": None,
     "pending_query": None,
@@ -79,6 +85,7 @@ def _refresh_models_and_history() -> None:
     try:
         info = api.list_models(st.session_state.token)
         st.session_state.available_models = info.get("available", [])
+        st.session_state.pullable_models = info.get("pullable", [])
         if not st.session_state.selected_model:
             st.session_state.selected_model = info.get("default")
     except api.ApiError:
@@ -139,6 +146,7 @@ if not _logged_in():
 
         if mode == "Sign in":
             st.caption("Default admin: `admin / admin123` — change in `.env` before production.")
+        bind_login_enter()
     st.stop()
 
 
@@ -167,23 +175,58 @@ with st.sidebar:
 
     st.divider()
     sidebar_section_title("Model")
-    if not st.session_state.available_models:
+    if not st.session_state.available_models and not st.session_state.get("pullable_models"):
         _refresh_models_and_history()
-    if st.session_state.available_models:
-        current = st.session_state.selected_model or st.session_state.available_models[0]
-        idx = (
-            st.session_state.available_models.index(current)
-            if current in st.session_state.available_models else 0
-        )
+
+    pulled = st.session_state.available_models or []
+    pullable = st.session_state.get("pullable_models") or []
+
+    if pulled:
+        current = st.session_state.selected_model or pulled[0]
+        idx = pulled.index(current) if current in pulled else 0
         st.session_state.selected_model = st.selectbox(
             "Active LLM",
-            st.session_state.available_models,
+            pulled,
             index=idx,
             help=(
-                "Choose which local LLM (served via Ollama) answers your queries. "
-                "Switching may take 2–3 s while Ollama evicts the previous model."
+                "Models actually loaded in Ollama. Switching may take 2–3 s "
+                "while Ollama evicts the previous one."
             ),
         )
+    else:
+        st.warning("No LLM is pulled yet. Pick one below and click Download.")
+
+    if pullable and st.session_state.role == "instructor":
+        with st.expander("Download more models", expanded=not pulled):
+            to_pull = st.selectbox(
+                "Model to download",
+                pullable,
+                key="pull_choice",
+                help="Models configured in AVAILABLE_LLMS but not yet in Ollama.",
+            )
+            if st.button("Download", key="pull_btn", use_container_width=True):
+                status = st.status(f"Downloading {to_pull}…", expanded=True)
+                progress_text = st.empty()
+                last_status = ""
+                try:
+                    for evt in api.pull_model(st.session_state.token, to_pull):
+                        msg = evt.get("status") or evt.get("error") or ""
+                        if msg and msg != last_status:
+                            progress_text.markdown(f"`{msg}`")
+                            last_status = msg
+                        if "error" in evt:
+                            status.update(label=f"Failed: {evt['error']}", state="error")
+                            break
+                    else:
+                        status.update(
+                            label=f"Downloaded {to_pull}",
+                            state="complete",
+                            expanded=False,
+                        )
+                        _refresh_models_and_history()
+                        st.rerun()
+                except api.ApiError as exc:
+                    status.update(label=f"Failed: {exc}", state="error")
 
     sidebar_section_title("Retrieval")
     st.session_state.temperature = st.slider(
