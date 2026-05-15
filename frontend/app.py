@@ -60,6 +60,7 @@ for k, v in {
     "dense_weight": 0.6,
     "selected_model": None,
     "pullable_models": [],
+    "models_initialized": False,
     "available_models": [],
     "last_query_at": None,
     "pending_query": None,
@@ -175,11 +176,17 @@ with st.sidebar:
 
     st.divider()
     sidebar_section_title("Model")
-    if not st.session_state.available_models and not st.session_state.get("pullable_models"):
+    if not st.session_state.get("models_initialized"):
         _refresh_models_and_history()
+        st.session_state["models_initialized"] = True
 
     pulled = st.session_state.available_models or []
     pullable = st.session_state.get("pullable_models") or []
+
+    if not pulled and not pullable:
+        if st.button("Refresh model list", key="refresh_models", use_container_width=True):
+            _refresh_models_and_history()
+            st.rerun()
 
     if pulled:
         current = st.session_state.selected_model or pulled[0]
