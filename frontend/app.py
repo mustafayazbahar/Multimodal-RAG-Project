@@ -46,6 +46,19 @@ st.set_page_config(
 
 inject_styles()
 
+
+# ────────────────────────────────────────────────────────────────────────────
+# Image fetching is hot in the render loop — Streamlit reruns the whole
+# script on every interaction, so without caching we'd re-download every
+# cited figure on each keystroke. @st.cache_data keeps the bytes in
+# memory keyed by (token, path), which avoids the N+1 reload storm and
+# the load it would put on the backend.
+# ────────────────────────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=64)
+def _cached_image_bytes(token: str, img_path: str) -> bytes | None:
+    return api.fetch_image_bytes(token, img_path)
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # Session state defaults
 # ────────────────────────────────────────────────────────────────────────────
@@ -343,6 +356,28 @@ with st.sidebar:
                         for d in err_items:
                             st.error(f"**{d.get('file', '?')}** — {d.get('reason', 'error')}")
 
+        # Destructive: dropping the Qdrant collection and wiping the state
+        # file means the next ingest treats every PDF as new. We gate it
+        # behind a confirm checkbox so a stray click can't nuke an indexed
+        # corpus by accident.
+        with st.expander("Danger zone", expanded=False):
+            confirm = st.checkbox(
+                "I understand this wipes the vector store and the fingerprint cache.",
+                key="reset_confirm",
+            )
+            if st.button(
+                "Reset knowledge base",
+                key="reset_kb_btn",
+                use_container_width=True,
+                disabled=not confirm,
+            ):
+                try:
+                    api.reset_knowledge_base(st.session_state.token)
+                    st.success("Knowledge base cleared. Re-upload PDFs to start fresh.")
+                    st.rerun()
+                except api.ApiError as exc:
+                    st.error(str(exc))
+
     st.divider()
     st.caption(
         "DeepCampus v2 · BGE-M3 hybrid + Qdrant · Local Ollama LLMs · "
@@ -367,7 +402,7 @@ def _render_messages() -> None:
                 for img_path in (msg.get("images") or []):
                     if not img_path:
                         continue
-                    blob = api.fetch_image_bytes(st.session_state.token, img_path)
+                    blob = _cached_image_bytes(st.session_state.token, img_path)
                     if blob:
                         st.image(blob, use_container_width=True)
                     else:
@@ -466,7 +501,7 @@ if user_query:
             for img_path in images_buffer:
                 if not img_path:
                     continue
-                blob = api.fetch_image_bytes(st.session_state.token, img_path)
+                blob = _cached_image_bytes(st.session_state.token, img_path)
                 if blob:
                     st.image(blob, use_container_width=True)
                 else:
