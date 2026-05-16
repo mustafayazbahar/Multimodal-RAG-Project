@@ -77,7 +77,8 @@ def upload_pdf(
 _INGEST_RESULT_MARKER = "INGESTION_RESULT:"
 
 
-def _parse_ingest_summary(stdout):
+def _parse_ingest_summary(stdout: str) -> dict | None:
+    """Find the last INGESTION_RESULT line in subprocess output and parse it."""
     for line in reversed(stdout.splitlines()):
         idx = line.find(_INGEST_RESULT_MARKER)
         if idx == -1:
@@ -86,6 +87,7 @@ def _parse_ingest_summary(stdout):
         try:
             return json.loads(payload)
         except json.JSONDecodeError:
+            log.warning("Could not parse ingest summary line: %s", payload[:200])
             return None
     return None
 
@@ -115,14 +117,27 @@ def run_ingest(_: Annotated[CurrentUser, Depends(require_instructor)]) -> Ingest
         skipped=summary.get("skipped", 0),
         duplicates=summary.get("duplicates", 0),
         errors=summary.get("errors", 0),
-        chunks=summary.get("chunks"),
+        chunks=summary.get("chunks", 0),
         details=summary.get("details", []),
     )
 
 
 @router.get("/image")
-def get_image(path: str, _: CurrentUser = Depends(get_current_user)) -> FileResponse:
-    """Serve an extracted image, restricted to the docs_images dir."""
+def get_image(
+    path: str,
+    _: CurrentUser = Depends(get_current_user),
+) -> FileResponse:
+    """Serve an extracted image, restricted to the docs_images dir.
+
+    Auth model rationale (PR #8 feedback):
+    Any authenticated user — instructor OR student — may view images.
+    This is intentional: chat answers cite figures via [GÖRSEL: path]
+    tags, and students need to render those citations to read the
+    paper. Students already have read access to the indexed content
+    via the chat endpoint, so the image endpoint inherits the same
+    trust boundary. Path-traversal is still pinned to docs_images so
+    no unrelated filesystem reads are possible.
+    """
     abs_path = Path(path).resolve()
     base = settings.paths.docs_images.resolve()
     try:
