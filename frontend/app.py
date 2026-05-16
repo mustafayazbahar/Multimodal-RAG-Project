@@ -310,11 +310,38 @@ with st.sidebar:
         if st.button("Process & update database", type="primary", use_container_width=True):
             with st.spinner("Running ingestion pipeline..."):
                 try:
-                    api.run_ingest(st.session_state.token)
-                    st.success("Vector store updated.")
-                    st.rerun()
+                    result = api.run_ingest(st.session_state.token)
                 except api.ApiError as exc:
                     st.error(str(exc))
+                    result = None
+            if result is not None:
+                summary = (
+                    f"Processed: **{result.get('processed', 0)}** · "
+                    f"Duplicates: **{result.get('duplicates', 0)}** · "
+                    f"Errors: **{result.get('errors', 0)}**"
+                )
+                if result.get('chunks'):
+                    summary += f" · Chunks: **{result['chunks']}**"
+                st.success(summary)
+                dup_items = [
+                    d for d in (result.get("details") or [])
+                    if d.get("status") == "duplicate"
+                ]
+                if dup_items:
+                    with st.expander("Duplicate files skipped", expanded=True):
+                        for d in dup_items:
+                            st.info(
+                                f"**{d.get('file', '?')}** — already indexed "
+                                f"({d.get('reason', 'duplicate')})."
+                            )
+                err_items = [
+                    d for d in (result.get("details") or [])
+                    if d.get("status") == "error"
+                ]
+                if err_items:
+                    with st.expander("Errors", expanded=True):
+                        for d in err_items:
+                            st.error(f"**{d.get('file', '?')}** — {d.get('reason', 'error')}")
 
     st.divider()
     st.caption(
@@ -337,6 +364,15 @@ def _render_messages() -> None:
                 if msg.get("sources"):
                     with st.expander("View sources", expanded=False):
                         source_cards(msg["sources"])
+                for img_path in (msg.get("images") or []):
+                    if not img_path:
+                        continue
+                    blob = api.fetch_image_bytes(st.session_state.token, img_path)
+                    if blob:
+                        st.image(blob, use_container_width=True)
+                    else:
+                        st.caption(f"Image unavailable: {img_path}")
+
 
 SUGGESTIONS = [
     "Summarize the main contributions of the indexed papers.",
@@ -427,6 +463,15 @@ if user_query:
             if sources_buffer:
                 with st.expander("View sources", expanded=False):
                     source_cards(sources_buffer)
+            for img_path in images_buffer:
+                if not img_path:
+                    continue
+                blob = api.fetch_image_bytes(st.session_state.token, img_path)
+                if blob:
+                    st.image(blob, use_container_width=True)
+                else:
+                    st.caption(f"Image unavailable: {img_path}")
+
             st.session_state.messages.append(
                 {
                     "role": "assistant",

@@ -57,16 +57,22 @@ def _save_state(state: dict) -> None:
 
 
 def _is_duplicate_against_state(fp, state: dict) -> tuple[bool, str]:
-    """Check the local state file for any matching prior fingerprint."""
+    """Check the local state file for any matching prior fingerprint.
+
+    Only file_hash (exact byte match) and content_hash (first 3 pages of
+    text + metadata) trigger a duplicate verdict. metadata_hash alone is
+    intentionally NOT a dedup signal (PR #8 review): generic titles like
+    "Progress Report" or "Lecture Notes" collide between unrelated
+    documents, and rejecting a fresh upload because two files happen to
+    share a title is worse than re-indexing the same PDF.
+    """
     for filename, entry in state.items():
         if not isinstance(entry, dict):
             continue
         if entry.get("file_hash") == fp.file_hash:
-            return True, f"file-hash matches '{filename}'"
+            return True, f"identical file (matches '{filename}')"
         if fp.content_hash and entry.get("content_hash") == fp.content_hash:
-            return True, f"content matches '{filename}'"
-        if fp.metadata_hash and entry.get("metadata_hash") == fp.metadata_hash:
-            return True, f"same title/author as '{filename}'"
+            return True, f"same content as '{filename}' (different filename or PDF stamp)"
     return False, ""
 
 
