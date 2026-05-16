@@ -356,6 +356,28 @@ with st.sidebar:
                         for d in err_items:
                             st.error(f"**{d.get('file', '?')}** — {d.get('reason', 'error')}")
 
+        # Destructive: dropping the Qdrant collection and wiping the state
+        # file means the next ingest treats every PDF as new. We gate it
+        # behind a confirm checkbox so a stray click can't nuke an indexed
+        # corpus by accident.
+        with st.expander("Danger zone", expanded=False):
+            confirm = st.checkbox(
+                "I understand this wipes the vector store and the fingerprint cache.",
+                key="reset_confirm",
+            )
+            if st.button(
+                "Reset knowledge base",
+                key="reset_kb_btn",
+                use_container_width=True,
+                disabled=not confirm,
+            ):
+                try:
+                    api.reset_knowledge_base(st.session_state.token)
+                    st.success("Knowledge base cleared. Re-upload PDFs to start fresh.")
+                    st.rerun()
+                except api.ApiError as exc:
+                    st.error(str(exc))
+
     st.divider()
     st.caption(
         "DeepCampus v2 · BGE-M3 hybrid + Qdrant · Local Ollama LLMs · "

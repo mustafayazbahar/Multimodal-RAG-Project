@@ -146,6 +146,15 @@ def run_ingest(token: str) -> dict:
     return resp.json()
 
 
+def reset_knowledge_base(token: str) -> dict:
+    resp = requests.post(
+        f"{BACKEND_URL}/ingest/reset", headers=_headers(token), timeout=60
+    )
+    if resp.status_code != 200:
+        raise ApiError(resp.json().get("detail", "Reset failed"))
+    return resp.json()
+
+
 def fetch_image_bytes(token: str, image_path: str) -> bytes | None:
     """Download an image through the backend."""
     resp = requests.get(

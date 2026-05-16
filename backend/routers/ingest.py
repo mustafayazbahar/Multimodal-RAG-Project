@@ -17,7 +17,7 @@ from backend.security import CurrentUser, get_current_user, require_instructor
 from services.config import settings
 from services.llm import evict_model
 from services.logging_config import get_logger
-from services.vectorstore import list_sources
+from services.vectorstore import list_sources, reset_collection
 
 log = get_logger(__name__)
 
@@ -120,6 +120,28 @@ def run_ingest(_: Annotated[CurrentUser, Depends(require_instructor)]) -> Ingest
         chunks=summary.get("chunks", 0),
         details=summary.get("details", []),
     )
+
+
+@router.post("/reset", status_code=status.HTTP_200_OK)
+def reset_knowledge_base(
+    _: Annotated[CurrentUser, Depends(require_instructor)],
+) -> dict:
+    """Drop the Qdrant collection AND wipe ingest_state.json.
+
+    After this call the next ingest treats every PDF in docs/ as new.
+    Use when you want to re-index after deleting a file from disk —
+    Qdrant is the source of truth for dedup, so simply removing the
+    file is not enough to make a re-upload count as fresh.
+    """
+    reset_collection()
+    state_path = settings.paths.state_file
+    if state_path.exists():
+        try:
+            state_path.unlink()
+        except OSError as exc:
+            log.warning("Could not delete state file %s: %s", state_path, exc)
+    log.info("Knowledge base reset: collection dropped + state file cleared")
+    return {"status": "reset", "collection": settings.qdrant.collection}
 
 
 @router.get("/image")
