@@ -46,6 +46,19 @@ st.set_page_config(
 
 inject_styles()
 
+
+# ────────────────────────────────────────────────────────────────────────────
+# Image fetching is hot in the render loop — Streamlit reruns the whole
+# script on every interaction, so without caching we'd re-download every
+# cited figure on each keystroke. @st.cache_data keeps the bytes in
+# memory keyed by (token, path), which avoids the N+1 reload storm and
+# the load it would put on the backend.
+# ────────────────────────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=64)
+def _cached_image_bytes(token: str, img_path: str) -> bytes | None:
+    return api.fetch_image_bytes(token, img_path)
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # Session state defaults
 # ────────────────────────────────────────────────────────────────────────────
@@ -367,7 +380,7 @@ def _render_messages() -> None:
                 for img_path in (msg.get("images") or []):
                     if not img_path:
                         continue
-                    blob = api.fetch_image_bytes(st.session_state.token, img_path)
+                    blob = _cached_image_bytes(st.session_state.token, img_path)
                     if blob:
                         st.image(blob, use_container_width=True)
                     else:
@@ -466,7 +479,7 @@ if user_query:
             for img_path in images_buffer:
                 if not img_path:
                     continue
-                blob = api.fetch_image_bytes(st.session_state.token, img_path)
+                blob = _cached_image_bytes(st.session_state.token, img_path)
                 if blob:
                     st.image(blob, use_container_width=True)
                 else:
