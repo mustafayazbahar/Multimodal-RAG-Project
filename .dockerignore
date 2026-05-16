@@ -1,0 +1,15 @@
+# Versiyon Kontrol
+.git
+.gitignore
+
+# Ortam ve Cache Dosyaları
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Büyük Veriler ve Dokümanlar (Bunlar Volume ile dışarıdan bağlanıyor, imajın içine gömülmemeli!)
+data/
+docs/
+docs_images/

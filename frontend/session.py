@@ -105,13 +105,7 @@ def clear_cookie() -> None:
 
 
 def hydrate_from_cookie() -> None:
-    """If the session is empty but a valid cookie exists, restore it.
-
-    Called once on every page load. The first call after a page refresh
-    often sees an empty cookie because the iframe hasn't pushed its
-    state to Python yet — we trigger a few short reruns to give it a
-    chance before falling back to the login screen.
-    """
+    """If the session is empty but a valid cookie exists, restore it."""
     if st.session_state.get("token"):
         return
 
@@ -120,11 +114,14 @@ def hydrate_from_cookie() -> None:
         st.session_state.token = cookie["token"]
         st.session_state.username = cookie["username"]
         st.session_state.role = cookie["role"]
-        st.session_state["_cookie_attempts"] = 0
-        return
+        # Çerezi başarıyla okuduk, UI'ı güncellemek için bir kere tetikle:
+        st.rerun()
 
+    
     attempts = st.session_state.get("_cookie_attempts", 0)
     if attempts < RETRY_BUDGET:
         st.session_state["_cookie_attempts"] = attempts + 1
         time.sleep(RETRY_DELAY_S)
         st.rerun()
+        
+

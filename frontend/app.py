@@ -1,22 +1,14 @@
-"""DeepCampus — modern Streamlit frontend.
-
-Talks to the FastAPI backend over HTTP. Visual + UX upgrades:
-- Amber-on-dark theme with system-aware light override.
-- Cookie-persisted session (no re-login on refresh).
-- Welcome screen with example prompts.
-- Avatar chat bubbles with timestamps.
-- Source cards (PDF + page) instead of plain text.
-- Sidebar live status (model, k, last ingest).
-- Sliders with explanatory tooltips.
-- Enter-to-submit login form + auto-scroll on new message.
-"""
 from __future__ import annotations
 
+# --- 1. STANDART KÜTÜPHANE İMPORTLARI ---
 import os
+import re
 import time
 
+# --- 2. ÜÇÜNCÜ PARTİ KÜTÜPHANELER ---
 import streamlit as st
 
+# --- 3. LOKAL PROJE İMPORTLARI ---
 from frontend import api_client as api
 from frontend import session as ses
 from frontend.components import (
@@ -35,8 +27,8 @@ from frontend.styles import (
     scroll_to_bottom,
 )
 
-os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-
+# --- 4. STREAMLIT SAYFA YAPILANDIRMASI ---
+# Best Practice: st.set_page_config HER ZAMAN ilk st komutu olmalıdır.
 st.set_page_config(
     page_title="DeepCampus — Hybrid RAG Assistant",
     page_icon="🎓",
@@ -44,7 +36,55 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# Çevre değişkenleri ve stil enjeksiyonu
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 inject_styles()
+
+# --- 5. GLOBAL DEĞİŞKENLER VE SABİTLER ---
+# Nereye koyacağım diye sorduğun regex kalıbının tam yeri burasıdır!
+# Bütün fonksiyonlardan önce tanımlanmalı ki, fonksiyonlar çalıştığında bellekte hazır olsun.
+_IMAGE_PATTERN = re.compile(r"\[IMAGE SUMMARY - ID:\s*(.*?)\]")
+
+# --- 6. YARDIMCI FONKSİYONLAR ---
+@st.cache_data(show_spinner=False, ttl=3600, max_entries=64)
+def _cached_image_bytes(token: str, img_path: str) -> bytes | None:
+    # Python artık "api"nin ne olduğunu biliyor çünkü 3. adımda import ettik.
+    return api.fetch_image_bytes(token, img_path)
+
+def _render_content_with_images(text: str) -> None:
+    """LLM'den gelen ham metni sanitize eder ve resimleri renderlar."""
+    # Python artık "_IMAGE_PATTERN"in ne olduğunu biliyor çünkü 5. adımda tanımladık.
+    clean_text = _IMAGE_PATTERN.sub("", text).strip()
+    if clean_text:
+        st.markdown(clean_text)
+    
+    for match in _IMAGE_PATTERN.finditer(text):
+        img_path = match.group(1).strip()
+        blob = _cached_image_bytes(st.session_state.token, img_path)
+        if blob:
+            st.image(blob, use_container_width=True)
+        else:
+            st.error(f"Görsel API'den çekilemedi veya backend'de yok: {img_path}")
+
+def _render_messages() -> None:
+    for msg in st.session_state.messages:
+        role = msg["role"]
+        avatar = "🧑‍🎓" if role == "user" else "🎓"
+        with st.chat_message(role, avatar=avatar):
+            chat_bubble_meta(role, msg.get("ts", ""))
+            
+            # Data Sanitization (Temizleme) fonksiyonumuzu çağırıyoruz
+            _render_content_with_images(msg.get("content", ""))
+            
+            if role == "assistant":
+                if msg.get("sources"):
+                    with st.expander("View sources", expanded=False):
+                        source_cards(msg["sources"])
+
+# ────────────────────────────────────────────────────────────────────────────
+# Session state defaults
+# ────────────────────────────────────────────────────────────────────────────
+# 
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -54,9 +94,6 @@ inject_styles()
 # memory keyed by (token, path), which avoids the N+1 reload storm and
 # the load it would put on the backend.
 # ────────────────────────────────────────────────────────────────────────────
-@st.cache_data(show_spinner=False, ttl=3600, max_entries=64)
-def _cached_image_bytes(token: str, img_path: str) -> bytes | None:
-    return api.fetch_image_bytes(token, img_path)
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -106,6 +143,7 @@ def _refresh_models_and_history() -> None:
         pass
 
 
+
 def _handle_auth(form_name: str, username: str, password: str) -> None:
     try:
         action = api.register if form_name == "Register" else api.login
@@ -115,10 +153,9 @@ def _handle_auth(form_name: str, username: str, password: str) -> None:
         st.session_state.username = data["username"]
         ses.save_cookie(data["access_token"], data["username"], data["role"])
         _refresh_models_and_history()
-        st.rerun()
+        
     except api.ApiError as exc:
         st.error(str(exc))
-
 
 def _logout() -> None:
     ses.clear_cookie()
@@ -134,34 +171,28 @@ def _logout() -> None:
 if not _logged_in():
     left, mid, right = st.columns([1, 2, 1])
     with mid:
-        hero(
-            "DeepCampus",
-            "Hybrid Retrieval-Augmented Generation over your academic PDFs. "
-            "Sign in to start asking questions.",
-        )
-
-        # Mode toggle lives OUTSIDE the form. st.form inside st.tabs in
-        # Streamlit 1.57 sometimes swallows the Enter keystroke; placing
-        # the form at top level fixes Enter-to-submit reliably.
-        mode = st.radio(
-            "Mode",
-            options=["Sign in", "Create account"],
-            horizontal=True,
-            label_visibility="collapsed",
-            key="auth_mode",
-        )
+        hero("DeepCampus", "Hybrid Retrieval-Augmented Generation...")
+        
+        mode = st.radio("Mode", options=["Sign in", "Create account"], horizontal=True, label_visibility="collapsed", key="auth_mode")
 
         with st.form("auth_form", clear_on_submit=False):
             u = st.text_input("Username", key="auth_user")
             p = st.text_input("Password", type="password", key="auth_pw")
             label = "Sign in" if mode == "Sign in" else "Create account"
             if st.form_submit_button(label, type="primary", use_container_width=True):
+                # Bu fonksiyon çalışınca st.session_state.token dolacak
                 _handle_auth("Login" if mode == "Sign in" else "Register", u, p)
 
         if mode == "Sign in":
             st.caption("Default admin: `admin / admin123` — change in `.env` before production.")
         bind_login_enter()
-    st.stop()
+    
+    # --- KRİTİK MİMARİ DÜZELTME BURADA ---
+    # Eğer yukarıdaki _handle_auth başarılı olduysa, artık _logged_in() True'dur.
+    # O yüzden körü körüne st.stop() demiyoruz. Eğer giriş yapıldıysa st.stop() pas geçilir,
+    # sayfanın geri kalanı render olur ve tarayıcıya ÇEREZ KAYDETME EMRİ sorunsuzca ulaşır!
+    if not _logged_in():
+        st.stop()
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -385,29 +416,6 @@ with st.sidebar:
     )
 
 
-# ────────────────────────────────────────────────────────────────────────────
-# Main pane
-# ────────────────────────────────────────────────────────────────────────────
-def _render_messages() -> None:
-    for msg in st.session_state.messages:
-        role = msg["role"]
-        avatar = "🧑‍🎓" if role == "user" else "🎓"
-        with st.chat_message(role, avatar=avatar):
-            chat_bubble_meta(role, msg.get("ts", ""))
-            st.markdown(msg.get("content", ""))
-            if role == "assistant":
-                if msg.get("sources"):
-                    with st.expander("View sources", expanded=False):
-                        source_cards(msg["sources"])
-                for img_path in (msg.get("images") or []):
-                    if not img_path:
-                        continue
-                    blob = _cached_image_bytes(st.session_state.token, img_path)
-                    if blob:
-                        st.image(blob, use_container_width=True)
-                    else:
-                        st.caption(f"Image unavailable: {img_path}")
-
 
 SUGGESTIONS = [
     "Summarize the main contributions of the indexed papers.",
@@ -487,7 +495,8 @@ if user_query:
 
             elapsed = time.perf_counter() - start
             final_answer = "".join(tokens).strip()
-            placeholder.markdown(final_answer)
+            placeholder.empty()
+            _render_content_with_images(final_answer)
             ttft_str = f"{ttft:.2f}s" if ttft else "—"
             status_box.update(
                 label=f"Done · {elapsed:.1f}s total · first token in {ttft_str}",
@@ -498,14 +507,7 @@ if user_query:
             if sources_buffer:
                 with st.expander("View sources", expanded=False):
                     source_cards(sources_buffer)
-            for img_path in images_buffer:
-                if not img_path:
-                    continue
-                blob = _cached_image_bytes(st.session_state.token, img_path)
-                if blob:
-                    st.image(blob, use_container_width=True)
-                else:
-                    st.caption(f"Image unavailable: {img_path}")
+            
 
             st.session_state.messages.append(
                 {
