@@ -36,8 +36,8 @@ import streamlit as st
 
 COOKIE_NAME = "dc_session"
 COOKIE_TTL_HOURS = int(os.getenv("JWT_TTL_HOURS", "12"))
-RETRY_BUDGET = 8
-RETRY_DELAY_S = 0.4
+RETRY_BUDGET = 10
+RETRY_DELAY_S = 0.35
 
 
 def _cookie_manager() -> stx.CookieManager:

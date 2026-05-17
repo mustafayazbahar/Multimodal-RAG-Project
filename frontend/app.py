@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 # --- 1. STANDART KÜTÜPHANE İMPORTLARI ---
+import json
 import os
 import re
 import time
 
 # --- 2. ÜÇÜNCÜ PARTİ KÜTÜPHANELER ---
 import streamlit as st
+
+# Tarayıcı tabanlı speech-to-text (Web Speech API wrapper). Eksikse
+# voice özellikleri sessizce devre dışı kalır, uygulama yine açılır.
+try:
+    from streamlit_mic_recorder import speech_to_text  # type: ignore
+    _STT_AVAILABLE = True
+except Exception:  # noqa: BLE001
+    speech_to_text = None  # type: ignore
+    _STT_AVAILABLE = False
 
 # --- 3. LOKAL PROJE İMPORTLARI ---
 from frontend import api_client as api
@@ -45,6 +55,53 @@ inject_styles()
 # Bütün fonksiyonlardan önce tanımlanmalı ki, fonksiyonlar çalıştığında bellekte hazır olsun.
 _IMAGE_PATTERN = re.compile(r"\[IMAGE SUMMARY - ID:\s*(.*?)\]")
 
+
+# Voice dil eşlemeleri. Sidebar'daki radio seçimi hem mikrofon (STT)
+# hem de "sesli oku" (TTS) için kullanılır.
+def _stt_lang_code(label: str) -> str:
+    return "tr" if label == "Türkçe" else "en"
+
+
+def _tts_lang_code(label: str) -> str:
+    return "tr-TR" if label == "Türkçe" else "en-US"
+
+
+def _speak_button(text: str, lang_tag: str, key: str) -> None:
+    """Cevabın yanına 'Sesli oku' butonu basar — tarayıcı TTS'i çağırır."""
+    if not text:
+        return
+    safe_text = json.dumps(text)
+    safe_lang = json.dumps(lang_tag)
+    btn_id = f"dc-tts-{key}"
+    st.components.v1.html(
+        f"""
+        <button id="{btn_id}"
+                style="background:transparent;border:1px solid #6b7280;
+                       color:#d4d4d8;padding:4px 10px;border-radius:6px;
+                       cursor:pointer;font-size:12px;margin-top:6px;">
+            🔊 Sesli oku
+        </button>
+        <script>
+        (function() {{
+            const btn = document.getElementById("{btn_id}");
+            if (!btn) return;
+            btn.addEventListener("click", () => {{
+                try {{
+                    const synth = window.parent.speechSynthesis;
+                    synth.cancel();
+                    const u = new SpeechSynthesisUtterance({safe_text});
+                    u.lang = {safe_lang};
+                    synth.speak(u);
+                }} catch (e) {{
+                    console.error("TTS failed:", e);
+                }}
+            }});
+        }})();
+        </script>
+        """,
+        height=44,
+    )
+
 # --- 6. YARDIMCI FONKSİYONLAR ---
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=64)
 def _cached_image_bytes(token: str, img_path: str) -> bytes | None:
@@ -67,19 +124,30 @@ def _render_content_with_images(text: str) -> None:
             st.error(f"Görsel API'den çekilemedi veya backend'de yok: {img_path}")
 
 def _render_messages() -> None:
-    for msg in st.session_state.messages:
+    lang_tag = _tts_lang_code(st.session_state.get("voice_lang", "Türkçe"))
+    for idx, msg in enumerate(st.session_state.messages):
         role = msg["role"]
         avatar = "🧑‍🎓" if role == "user" else "🎓"
         with st.chat_message(role, avatar=avatar):
             chat_bubble_meta(role, msg.get("ts", ""))
-            
+
             # Data Sanitization (Temizleme) fonksiyonumuzu çağırıyoruz
-            _render_content_with_images(msg.get("content", ""))
-            
+            content = msg.get("content", "")
+            _render_content_with_images(content)
+
             if role == "assistant":
+                # Backend'in `images` event'inde gönderdiği yollar — Gemini'nin
+                # regex'i bu yolu yakalayamadığı için ayrıca render ediyoruz.
+                for img_path in (msg.get("images") or []):
+                    if not img_path:
+                        continue
+                    blob = _cached_image_bytes(st.session_state.token, img_path)
+                    if blob:
+                        st.image(blob, use_container_width=True)
                 if msg.get("sources"):
                     with st.expander("View sources", expanded=False):
                         source_cards(msg["sources"])
+                _speak_button(content, lang_tag, key=f"hist-{idx}")
 
 # ────────────────────────────────────────────────────────────────────────────
 # Session state defaults
@@ -114,6 +182,7 @@ for k, v in {
     "available_models": [],
     "last_query_at": None,
     "pending_query": None,
+    "voice_lang": "Türkçe",
 }.items():
     st.session_state.setdefault(k, v)
 
@@ -153,7 +222,12 @@ def _handle_auth(form_name: str, username: str, password: str) -> None:
         st.session_state.username = data["username"]
         ses.save_cookie(data["access_token"], data["username"], data["role"])
         _refresh_models_and_history()
-        
+        # F5 fix: give the iframe a beat to actually write the cookie
+        # before we rerun. Without this pause cm.set's async postMessage
+        # can lose the race against navigation and the cookie never
+        # lands in the jar — F5 then sends the user back to the login.
+        time.sleep(0.6)
+        st.rerun()
     except api.ApiError as exc:
         st.error(str(exc))
 
@@ -217,6 +291,17 @@ with st.sidebar:
                 st.rerun()
             except api.ApiError as exc:
                 st.error(str(exc))
+
+    st.divider()
+    sidebar_section_title("Voice")
+    st.session_state.voice_lang = st.radio(
+        "Konuşma dili",
+        options=["Türkçe", "English"],
+        index=0 if st.session_state.get("voice_lang", "Türkçe") == "Türkçe" else 1,
+        horizontal=True,
+        key="voice_lang_radio",
+        help="Mikrofonla sorma ve cevabı sesli okumada kullanılacak dil.",
+    )
 
     st.divider()
     sidebar_section_title("Model")
@@ -439,6 +524,32 @@ else:
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# Mikrofon: Web Speech API ile tarayıcı tarafında transkripsiyon yapar,
+# sonucu pending_query'e koyar — mevcut chat akışı hiç değişmeden çalışır.
+# Ses kullanıcının cihazından çıkmıyor.
+# ────────────────────────────────────────────────────────────────────────────
+if _STT_AVAILABLE:
+    voice_col, _spacer = st.columns([1, 4])
+    with voice_col:
+        stt_lang = _stt_lang_code(st.session_state.get("voice_lang", "Türkçe"))
+        spoken = speech_to_text(
+            language=stt_lang,
+            start_prompt="🎤 Konuş",
+            stop_prompt="⏹️ Durdur",
+            just_once=True,
+            use_container_width=True,
+            key="stt_widget",
+        )
+        if spoken:
+            st.session_state.pending_query = spoken
+else:
+    st.caption(
+        "🎤 Sesli giriş için frontend container'ında `streamlit-mic-recorder` "
+        "kurulu olmalı. Rebuild gerekebilir."
+    )
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # Chat input + streaming response
 # ────────────────────────────────────────────────────────────────────────────
 typed = st.chat_input("Ask a question about the documents...")
@@ -504,10 +615,26 @@ if user_query:
                 expanded=False,
             )
 
+            # Backend `images` event'inde gelen yolları doğrudan render et.
+            # _render_content_with_images bu yolları yakalayamadığı için
+            # ek bir geçiş yapıyoruz (cached helper sayesinde re-render
+            # döngüsünde tekrar indirme olmaz).
+            for img_path in images_buffer:
+                if not img_path:
+                    continue
+                blob = _cached_image_bytes(st.session_state.token, img_path)
+                if blob:
+                    st.image(blob, use_container_width=True)
+
             if sources_buffer:
                 with st.expander("View sources", expanded=False):
                     source_cards(sources_buffer)
-            
+
+            _speak_button(
+                final_answer,
+                _tts_lang_code(st.session_state.get("voice_lang", "Türkçe")),
+                key="live-answer",
+            )
 
             st.session_state.messages.append(
                 {
