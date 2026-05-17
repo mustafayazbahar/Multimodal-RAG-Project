@@ -20,7 +20,7 @@ except Exception:  # noqa: BLE001
 
 # --- 3. LOKAL PROJE İMPORTLARI ---
 from frontend import api_client as api
-from frontend import session as ses
+# DİKKAT: session (ses) importu tamamen silindi!
 from frontend.components import (
     chat_bubble_meta,
     hero,
@@ -38,7 +38,6 @@ from frontend.styles import (
 )
 
 # --- 4. STREAMLIT SAYFA YAPILANDIRMASI ---
-# Best Practice: st.set_page_config HER ZAMAN ilk st komutu olmalıdır.
 st.set_page_config(
     page_title="DeepCampus — Hybrid RAG Assistant",
     page_icon="🎓",
@@ -51,20 +50,14 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 inject_styles()
 
 # --- 5. GLOBAL DEĞİŞKENLER VE SABİTLER ---
-# Nereye koyacağım diye sorduğun regex kalıbının tam yeri burasıdır!
-# Bütün fonksiyonlardan önce tanımlanmalı ki, fonksiyonlar çalıştığında bellekte hazır olsun.
 _IMAGE_PATTERN = re.compile(r"\[IMAGE SUMMARY - ID:\s*(.*?)\]")
 
-
-# Voice dil eşlemeleri. Sidebar'daki radio seçimi hem mikrofon (STT)
-# hem de "sesli oku" (TTS) için kullanılır.
+# Voice dil eşlemeleri.
 def _stt_lang_code(label: str) -> str:
     return "tr" if label == "Türkçe" else "en"
 
-
 def _tts_lang_code(label: str) -> str:
     return "tr-TR" if label == "Türkçe" else "en-US"
-
 
 def _speak_button(text: str, lang_tag: str, key: str) -> None:
     """Cevabın yanına 'Sesli oku' butonu basar — tarayıcı TTS'i çağırır."""
@@ -105,12 +98,10 @@ def _speak_button(text: str, lang_tag: str, key: str) -> None:
 # --- 6. YARDIMCI FONKSİYONLAR ---
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=64)
 def _cached_image_bytes(token: str, img_path: str) -> bytes | None:
-    # Python artık "api"nin ne olduğunu biliyor çünkü 3. adımda import ettik.
     return api.fetch_image_bytes(token, img_path)
 
 def _render_content_with_images(text: str) -> None:
     """LLM'den gelen ham metni sanitize eder ve resimleri renderlar."""
-    # Python artık "_IMAGE_PATTERN"in ne olduğunu biliyor çünkü 5. adımda tanımladık.
     clean_text = _IMAGE_PATTERN.sub("", text).strip()
     if clean_text:
         st.markdown(clean_text)
@@ -131,13 +122,10 @@ def _render_messages() -> None:
         with st.chat_message(role, avatar=avatar):
             chat_bubble_meta(role, msg.get("ts", ""))
 
-            # Data Sanitization (Temizleme) fonksiyonumuzu çağırıyoruz
             content = msg.get("content", "")
             _render_content_with_images(content)
 
             if role == "assistant":
-                # Backend'in `images` event'inde gönderdiği yollar — Gemini'nin
-                # regex'i bu yolu yakalayamadığı için ayrıca render ediyoruz.
                 for img_path in (msg.get("images") or []):
                     if not img_path:
                         continue
@@ -150,22 +138,7 @@ def _render_messages() -> None:
                 _speak_button(content, lang_tag, key=f"hist-{idx}")
 
 # ────────────────────────────────────────────────────────────────────────────
-# Session state defaults
-# ────────────────────────────────────────────────────────────────────────────
-# 
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# Image fetching is hot in the render loop — Streamlit reruns the whole
-# script on every interaction, so without caching we'd re-download every
-# cited figure on each keystroke. @st.cache_data keeps the bytes in
-# memory keyed by (token, path), which avoids the N+1 reload storm and
-# the load it would put on the backend.
-# ────────────────────────────────────────────────────────────────────────────
-
-
-# ────────────────────────────────────────────────────────────────────────────
-# Session state defaults
+# Session state defaults & F5 HYDRATION (Kritik Bölge)
 # ────────────────────────────────────────────────────────────────────────────
 for k, v in {
     "token": None,
@@ -186,8 +159,12 @@ for k, v in {
 }.items():
     st.session_state.setdefault(k, v)
 
-ses.hydrate_from_cookie()
-
+# 🚀 MİMARIN DOKUNUŞU: F5 KORUMASI (URL PERSISTENCE)
+# RAM sıfırlansa bile tarayıcı URL'i sıfırlanmaz. State'i URL'den geri yükle.
+if "token" in st.query_params and "user" in st.query_params:
+    st.session_state.token = st.query_params["token"]
+    st.session_state.username = st.query_params["user"]
+    st.session_state.role = st.query_params.get("role", "user")
 
 # ────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -195,9 +172,7 @@ ses.hydrate_from_cookie()
 def _logged_in() -> bool:
     return bool(st.session_state.token)
 
-
 def _refresh_models_and_history() -> None:
-    """Pull chat history and model list from the backend into session state."""
     try:
         st.session_state.messages = api.get_history(st.session_state.token)
     except api.ApiError:
@@ -211,33 +186,34 @@ def _refresh_models_and_history() -> None:
     except api.ApiError:
         pass
 
-
-
 def _handle_auth(form_name: str, username: str, password: str) -> None:
     try:
         action = api.register if form_name == "Register" else api.login
         data = action(username, password)
+        
+        # 1. RAM'e kaydet
         st.session_state.token = data["access_token"]
         st.session_state.role = data["role"]
         st.session_state.username = data["username"]
-        ses.save_cookie(data["access_token"], data["username"], data["role"])
+        
+        # 2. 🚀 URL'E KAYDET (F5'ten sağ çıkmak için)
+        st.query_params["token"] = data["access_token"]
+        st.query_params["user"] = data["username"]
+        st.query_params["role"] = data["role"]
+        
         _refresh_models_and_history()
-        # F5 fix: give the iframe a beat to actually write the cookie
-        # before we rerun. Without this pause cm.set's async postMessage
-        # can lose the race against navigation and the cookie never
-        # lands in the jar — F5 then sends the user back to the login.
-        time.sleep(0.6)
-        st.rerun()
+        st.rerun() 
     except api.ApiError as exc:
         st.error(str(exc))
 
 def _logout() -> None:
-    ses.clear_cookie()
-    for key in ("token", "username", "role", "messages", "available_models",
-                "selected_model"):
+    # 1. RAM'i temizle
+    for key in ("token", "username", "role", "messages", "available_models", "selected_model"):
         st.session_state[key] = [] if key in ("messages", "available_models") else None
+        
+    # 2. 🚀 URL'İ TEMİZLE
+    st.query_params.clear()
     st.rerun()
-
 
 # ────────────────────────────────────────────────────────────────────────────
 # Auth screen
@@ -254,20 +230,14 @@ if not _logged_in():
             p = st.text_input("Password", type="password", key="auth_pw")
             label = "Sign in" if mode == "Sign in" else "Create account"
             if st.form_submit_button(label, type="primary", use_container_width=True):
-                # Bu fonksiyon çalışınca st.session_state.token dolacak
                 _handle_auth("Login" if mode == "Sign in" else "Register", u, p)
 
         if mode == "Sign in":
             st.caption("Default admin: `admin / admin123` — change in `.env` before production.")
         bind_login_enter()
     
-    # --- KRİTİK MİMARİ DÜZELTME BURADA ---
-    # Eğer yukarıdaki _handle_auth başarılı olduysa, artık _logged_in() True'dur.
-    # O yüzden körü körüne st.stop() demiyoruz. Eğer giriş yapıldıysa st.stop() pas geçilir,
-    # sayfanın geri kalanı render olur ve tarayıcıya ÇEREZ KAYDETME EMRİ sorunsuzca ulaşır!
     if not _logged_in():
         st.stop()
-
 
 # ────────────────────────────────────────────────────────────────────────────
 # Sidebar
@@ -324,10 +294,7 @@ with st.sidebar:
             "Active LLM",
             pulled,
             index=idx,
-            help=(
-                "Models actually loaded in Ollama. Switching may take 2–3 s "
-                "while Ollama evicts the previous one."
-            ),
+            help="Models actually loaded in Ollama. Switching may take 2–3 s.",
         )
     else:
         st.warning("No LLM is pulled yet. Pick one below and click Download.")
@@ -338,7 +305,6 @@ with st.sidebar:
                 "Model to download",
                 pullable,
                 key="pull_choice",
-                help="Models configured in AVAILABLE_LLMS but not yet in Ollama.",
             )
             if st.button("Download", key="pull_btn", use_container_width=True):
                 status = st.status(f"Downloading {to_pull}…", expanded=True)
@@ -354,53 +320,16 @@ with st.sidebar:
                             status.update(label=f"Failed: {evt['error']}", state="error")
                             break
                     else:
-                        status.update(
-                            label=f"Downloaded {to_pull}",
-                            state="complete",
-                            expanded=False,
-                        )
+                        status.update(label=f"Downloaded {to_pull}", state="complete", expanded=False)
                         _refresh_models_and_history()
                         st.rerun()
                 except api.ApiError as exc:
                     status.update(label=f"Failed: {exc}", state="error")
 
     sidebar_section_title("Retrieval")
-    st.session_state.temperature = st.slider(
-        "Temperature",
-        0.0,
-        1.0,
-        st.session_state.temperature,
-        0.05,
-        help=(
-            "How creative the LLM is. Low values (0.0–0.3) keep the answer close "
-            "to the retrieved context — recommended for academic Q&A. Higher "
-            "values introduce more variation but risk hallucination."
-        ),
-    )
-    st.session_state.k_value = st.slider(
-        "Top-k retrieval",
-        4,
-        40,
-        st.session_state.k_value,
-        1,
-        help=(
-            "How many candidate chunks the hybrid search fetches *before* "
-            "fusion. Larger k → broader recall but more LLM context. "
-            "After RRF fusion the top 8 chunks are sent to the model."
-        ),
-    )
-    st.session_state.dense_weight = st.slider(
-        "Dense ↔ Sparse weight",
-        0.0,
-        1.0,
-        st.session_state.dense_weight,
-        0.05,
-        help=(
-            "Tilt of the hybrid fusion. 1.0 = pure semantic (BGE-M3 dense); "
-            "0.0 = pure lexical (sparse, BM25-like). Default 0.6 balances "
-            "concept matching with exact-keyword fidelity."
-        ),
-    )
+    st.session_state.temperature = st.slider("Temperature", 0.0, 1.0, st.session_state.temperature, 0.05)
+    st.session_state.k_value = st.slider("Top-k retrieval", 4, 40, st.session_state.k_value, 1)
+    st.session_state.dense_weight = st.slider("Dense ↔ Sparse weight", 0.0, 1.0, st.session_state.dense_weight, 0.05)
 
     if st.session_state.role == "instructor":
         st.divider()
@@ -420,11 +349,7 @@ with st.sidebar:
         except api.ApiError as exc:
             st.warning(str(exc))
 
-        uploaded = st.file_uploader(
-            "Upload PDF",
-            type="pdf",
-            help="Drops the file into docs/. Run 'Process' afterwards to embed it.",
-        )
+        uploaded = st.file_uploader("Upload PDF", type="pdf")
         if uploaded is not None:
             try:
                 result = api.upload_pdf(
@@ -452,63 +377,39 @@ with st.sidebar:
                 if result.get('chunks'):
                     summary += f" · Chunks: **{result['chunks']}**"
                 st.success(summary)
-                dup_items = [
-                    d for d in (result.get("details") or [])
-                    if d.get("status") == "duplicate"
-                ]
+                dup_items = [d for d in (result.get("details") or []) if d.get("status") == "duplicate"]
                 if dup_items:
                     with st.expander("Duplicate files skipped", expanded=True):
                         for d in dup_items:
-                            st.info(
-                                f"**{d.get('file', '?')}** — already indexed "
-                                f"({d.get('reason', 'duplicate')})."
-                            )
-                err_items = [
-                    d for d in (result.get("details") or [])
-                    if d.get("status") == "error"
-                ]
+                            st.info(f"**{d.get('file', '?')}** — already indexed.")
+                err_items = [d for d in (result.get("details") or []) if d.get("status") == "error"]
                 if err_items:
                     with st.expander("Errors", expanded=True):
                         for d in err_items:
                             st.error(f"**{d.get('file', '?')}** — {d.get('reason', 'error')}")
 
-        # Destructive: dropping the Qdrant collection and wiping the state
-        # file means the next ingest treats every PDF as new. We gate it
-        # behind a confirm checkbox so a stray click can't nuke an indexed
-        # corpus by accident.
         with st.expander("Danger zone", expanded=False):
-            confirm = st.checkbox(
-                "I understand this wipes the vector store and the fingerprint cache.",
-                key="reset_confirm",
-            )
-            if st.button(
-                "Reset knowledge base",
-                key="reset_kb_btn",
-                use_container_width=True,
-                disabled=not confirm,
-            ):
+            confirm = st.checkbox("I understand this wipes the vector store.", key="reset_confirm")
+            if st.button("Reset knowledge base", key="reset_kb_btn", use_container_width=True, disabled=not confirm):
                 try:
                     api.reset_knowledge_base(st.session_state.token)
-                    st.success("Knowledge base cleared. Re-upload PDFs to start fresh.")
+                    st.success("Knowledge base cleared.")
                     st.rerun()
                 except api.ApiError as exc:
                     st.error(str(exc))
 
     st.divider()
-    st.caption(
-        "DeepCampus v2 · BGE-M3 hybrid + Qdrant · Local Ollama LLMs · "
-        "All inference stays on your machine."
-    )
+    st.caption("DeepCampus v2 · BGE-M3 hybrid + Qdrant · Local Ollama LLMs")
 
-
-
+# ────────────────────────────────────────────────────────────────────────────
+# Ana Ekran
+# ────────────────────────────────────────────────────────────────────────────
 SUGGESTIONS = [
     "Summarize the main contributions of the indexed papers.",
     "Compare the proposed methods across the documents.",
     "Which papers discuss evaluation metrics, and how do they differ?",
     "Explain a figure or chart from the most relevant document.",
 ]
-
 
 if not st.session_state.messages:
     picked = welcome_screen(st.session_state.username, SUGGESTIONS)
@@ -522,12 +423,7 @@ else:
     )
     _render_messages()
 
-
-# ────────────────────────────────────────────────────────────────────────────
-# Mikrofon: Web Speech API ile tarayıcı tarafında transkripsiyon yapar,
-# sonucu pending_query'e koyar — mevcut chat akışı hiç değişmeden çalışır.
-# Ses kullanıcının cihazından çıkmıyor.
-# ────────────────────────────────────────────────────────────────────────────
+# Mikrofon
 if _STT_AVAILABLE:
     voice_col, _spacer = st.columns([1, 4])
     with voice_col:
@@ -542,16 +438,8 @@ if _STT_AVAILABLE:
         )
         if spoken:
             st.session_state.pending_query = spoken
-else:
-    st.caption(
-        "🎤 Sesli giriş için frontend container'ında `streamlit-mic-recorder` "
-        "kurulu olmalı. Rebuild gerekebilir."
-    )
 
-
-# ────────────────────────────────────────────────────────────────────────────
-# Chat input + streaming response
-# ────────────────────────────────────────────────────────────────────────────
+# Mesaj Gönderme
 typed = st.chat_input("Ask a question about the documents...")
 user_query = st.session_state.pending_query or typed
 st.session_state.pending_query = None
@@ -615,10 +503,6 @@ if user_query:
                 expanded=False,
             )
 
-            # Backend `images` event'inde gelen yolları doğrudan render et.
-            # _render_content_with_images bu yolları yakalayamadığı için
-            # ek bir geçiş yapıyoruz (cached helper sayesinde re-render
-            # döngüsünde tekrar indirme olmaz).
             for img_path in images_buffer:
                 if not img_path:
                     continue
