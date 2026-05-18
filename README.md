@@ -7,13 +7,16 @@
   <img src="https://img.shields.io/badge/LLM-Llama_3.1_•_Qwen2.5_•_Gemma2-purple?style=for-the-badge&logo=meta" />
   <img src="https://img.shields.io/badge/VectorDB-Qdrant-DC382D?style=for-the-badge" />
   <img src="https://img.shields.io/badge/Embeddings-BGE--M3_(dense+sparse)-F59E0B?style=for-the-badge" />
+  <img src="https://img.shields.io/badge/Voice-TR_•_EN-9333EA?style=for-the-badge" />
   <img src="https://img.shields.io/badge/Docker-GPU_Ready-2496ED?style=for-the-badge&logo=docker" />
   <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" />
 </p>
 
 > **DeepCampus** is a **local-first, privacy-preserving** Multimodal RAG system designed for academic research. It reads, understands, and answers questions about complex PDF documents — including charts, tables, and scanned pages — entirely on your own hardware. No cloud, no API keys, no data leakage.
 
-> **v2.1 update** — backend/frontend split, **hybrid retrieval** (BGE-M3 dense + sparse with RRF fusion), **Qdrant** vector store, **multi-LLM** benchmarking, **metadata-based PDF dedup**, and a fully redesigned **amber-on-dark UI** with session persistence.
+> **v2.2 update** — voice I/O (TR + EN), localStorage-backed F5-proof sessions, reset-knowledge-base button, tag-aware model matching, robust image rendering, and the conservative dedup model (file + content hash; metadata-only dedup removed to kill false positives).
+
+> **v2.1 update** — backend/frontend split, **hybrid retrieval** (BGE-M3 dense + sparse with RRF fusion), **Qdrant** vector store, **multi-LLM** benchmarking, **smart PDF dedup**, and a fully redesigned **amber-on-dark UI**.
 
 ---
 
@@ -25,10 +28,12 @@
 | 🔀 **Hybrid Retrieval** | BGE-M3 (dense + sparse) + RRF | Semantic similarity AND lexical exact-match in one query |
 | 🗄️ **Qdrant Vector DB** | Named dense (1024-d) + sparse vectors | Fast filtering, payload indexes for dedup, persistent storage |
 | 👁️ **Visual Intelligence** | Moondream2 VLM | Summarizes charts, tables, diagrams inside PDFs |
-| 📑 **Smart PDF Dedup** | File hash + content + metadata fingerprint | Catches same paper saved under different filename or re-stamped headers |
+| 📑 **Smart PDF Dedup** | File hash + content fingerprint | Catches same paper saved under a different filename or re-stamped headers, without false positives on shared titles |
 | 📄 **Hybrid OCR** | PyMuPDF + EasyOCR | Digital text extraction with scanned-page fallback (TR + EN) |
+| 🎙️ **Voice I/O** | Browser Web Speech API | Mic-to-text **and** "Sesli oku" TTS in TR or EN — audio never leaves the device |
 | 🔐 **JWT + RBAC** | bcrypt + JWT bearer | Instructor / Student roles, legacy SHA-256 migration on login |
-| 🍪 **Persistent Session** | HTTP cookie + JWT TTL | Refreshing the page does **not** log you out (12h default) |
+| 💾 **Refresh-proof Login** | Browser localStorage | F5 keeps you signed in; no JWT in the URL, no third-party cookie blocking |
+| 🧹 **Reset Knowledge Base** | One-click sidebar action | Drops the Qdrant collection + state file so the next ingest is fresh |
 | 🎨 **Modern UI** | Amber-on-dark, system-aware | Avatar chat bubbles, source cards, welcome screen, sliders w/ tooltips |
 | 🐳 **4-Service Stack** | Docker Compose | qdrant + ollama + backend (FastAPI) + frontend (Streamlit) |
 
@@ -44,19 +49,20 @@
 │   │  Frontend    │ ◄─────────────────► │   Backend (FastAPI :8000)   │  │
 │   │ (Streamlit)  │   NDJSON stream     │                             │  │
 │   │              │                     │  /auth   /chat   /ingest    │  │
-│   │  • Cookie-   │                     │  JWT bearer  •  RBAC        │  │
-│   │    persisted │                     └──────┬───────────────┬──────┘  │
+│   │  • Local-    │                     │  JWT bearer  •  RBAC        │  │
+│   │    Storage   │                     └──────┬───────────────┬──────┘  │
 │   │    JWT       │                            │               │         │
-│   │  • Avatars,  │                            ▼               ▼         │
-│   │    sources,  │                  ┌───────────────┐  ┌────────────┐   │
-│   │    welcome   │                  │  Qdrant :6333 │  │ Ollama     │   │
-│   │    screen    │                  │  named dense  │  │   :11434   │   │
-│   │              │                  │  + sparse vec │  │  multi-LLM │   │
-│   └──────────────┘                  └───────────────┘  └────────────┘   │
+│   │  • Voice TR/ │                            ▼               ▼         │
+│   │    EN (Web   │                  ┌───────────────┐  ┌────────────┐   │
+│   │    Speech)   │                  │  Qdrant :6333 │  │ Ollama     │   │
+│   │  • Avatars,  │                  │  named dense  │  │   :11434   │   │
+│   │    sources,  │                  │  + sparse vec │  │  multi-LLM │   │
+│   │    images    │                  └───────────────┘  └────────────┘   │
+│   └──────────────┘                                                     │
 │                                                                        │
 │   Ingestion (subprocess on /ingest/run):                               │
 │                                                                        │
-│      PDF → fingerprint (file + content + meta) → skip if dup           │
+│      PDF → fingerprint (file hash + content hash) → skip if dup        │
 │            ↓                                                           │
 │            text  → PyMuPDF / EasyOCR (OCR fallback)                    │
 │            ↓                                                           │
@@ -82,7 +88,7 @@ This sequential approach prevents OOM on 16 GB consumer GPUs (tested on RTX 4080
 
 | Layer | Technology |
 |---|---|
-| Frontend | Streamlit ≥ 1.36 + `extra-streamlit-components` (cookies) |
+| Frontend | Streamlit ≥ 1.36 + `streamlit-local-storage` (session) + `streamlit-mic-recorder` (STT) |
 | Backend | FastAPI 0.110+ • Uvicorn • PyJWT |
 | LLM Inference | Ollama + `{Llama 3.1 8B q8 • Qwen2.5 14B q4 • Gemma 2 9B q4}` |
 | Visual Language Model | Moondream2 (2024-08-26 revision) |
@@ -93,7 +99,8 @@ This sequential approach prevents OOM on 16 GB consumer GPUs (tested on RTX 4080
 | OCR Fallback | EasyOCR (TR + EN) |
 | Chunking | BGE-M3 tokenizer (1024 tok / 128 overlap) |
 | Auth | bcrypt + JWT • SQLite for users/history |
-| Session | HTTP cookie with TTL (12 h default) |
+| Session | Browser `localStorage` (JWT TTL 12 h default) |
+| Voice I/O | Browser Web Speech API (SpeechRecognition + SpeechSynthesis) |
 | Containerization | Docker + Docker Compose (NVIDIA GPU passthrough) |
 
 ---
@@ -105,6 +112,7 @@ This sequential approach prevents OOM on 16 GB consumer GPUs (tested on RTX 4080
 - Docker & Docker Compose installed
 - NVIDIA GPU with CUDA support (recommended: **16 GB+ VRAM** for Qwen2.5 14B; 8 GB minimum for Llama 3.1 8B alone)
 - NVIDIA Container Toolkit installed ([guide](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html))
+- A Chromium-based browser (Chrome / Edge) for full voice support — Web Speech APIs work best there.
 
 ### 1. Clone the Repository
 
@@ -144,7 +152,7 @@ docker exec -it deepcampus_ollama ollama pull gemma2:9b-instruct-q4_K_M
 | **Qwen2.5 14B** | q4_K_M | ~9 GB | ~25 | Strongest on Turkish + technical content |
 | **Gemma 2 9B** | q4_K_M | ~5.5 GB | ~40 | Fastest; good for academic English |
 
-> On 16 GB VRAM only one LLM fits alongside BGE-M3 (~2.3 GB) at a time. Ollama auto-evicts when you switch models — expect a 2-3 s pause on first query after a switch.
+> On 16 GB VRAM only one LLM fits alongside BGE-M3 (~2.3 GB) at a time. Ollama auto-evicts when you switch models — expect a 2-3 s pause on first query after a switch. The model dropdown only lists actually-pulled models; the **Download more models** expander lets instructors pull missing ones with live progress.
 
 ### 5. Open DeepCampus
 
@@ -162,6 +170,15 @@ Password: admin123
 ```
 
 > ⚠️ Change these in `.env` immediately for production.
+
+### Pausing & Resuming the Stack
+
+```bash
+docker compose stop    # halts containers, keeps volumes + ingested data
+docker compose start   # brings everything back exactly as it was
+```
+
+`docker compose down` is reserved for a full teardown — it removes containers (volumes survive unless you add `-v`).
 
 ---
 
@@ -189,12 +206,12 @@ Multimodal-RAG-Project/
 │   └── routers/
 │       ├── auth.py            # /auth/{login,register}
 │       ├── chat.py            # /chat/{query,history,models,benchmark}
-│       └── ingest.py          # /ingest/{upload,run,status,image}
+│       └── ingest.py          # /ingest/{upload,run,status,image,reset}
 │
 ├── frontend/                  # Streamlit thin client
-│   ├── app.py                 # Main UI (welcome screen, chat, sidebar)
+│   ├── app.py                 # Main UI (welcome screen, chat, sidebar, voice)
 │   ├── api_client.py          # HTTP client over backend
-│   ├── session.py             # Cookie-based JWT persistence
+│   ├── session.py             # localStorage-backed JWT persistence
 │   ├── styles.py              # CSS injection (amber-on-dark + light override)
 │   ├── components.py          # Hero, source cards, status pills, etc.
 │   └── .streamlit/config.toml # Native theme config
@@ -203,7 +220,7 @@ Multimodal-RAG-Project/
 ├── docker/                    # Per-service Dockerfiles
 │   ├── Dockerfile.backend
 │   └── Dockerfile.frontend
-├── tests/                     # 22 pytest cases (auth, fusion, fp, sanitize, JWT)
+├── tests/                     # pytest cases (auth, fusion, fp, sanitize, JWT, retriever)
 ├── docs/                      # 📁 Drop your PDF files here
 ├── docs_images/               # 📁 Auto-extracted images from PDFs
 ├── data/
@@ -225,10 +242,13 @@ Multimodal-RAG-Project/
 | Ask questions | ✅ | ✅ |
 | View chat history | ✅ | ✅ |
 | Clear own chat | ✅ | ✅ |
+| Voice input / read-aloud | ✅ | ✅ |
 | Switch LLM at query time | ✅ | ✅ |
 | Adjust temperature / top-k / hybrid weight | ✅ | ✅ |
 | Upload PDF documents | ❌ | ✅ |
 | Trigger database update | ❌ | ✅ |
+| Pull new LLMs from Ollama | ❌ | ✅ |
+| **Reset knowledge base** | ❌ | ✅ |
 | Run multi-LLM benchmark | ❌ | ✅ |
 
 ---
@@ -251,7 +271,7 @@ All knobs are env-driven (see `.env.example`). The most impactful ones:
 | `TEMPERATURE` | 0.3 | LLM creativity (low = grounded) |
 | `HISTORY_WINDOW` | 4 | Conversation turns sent back to LLM |
 | `JWT_SECRET` | change-me | **Override for production** |
-| `JWT_TTL_HOURS` | 12 | Session cookie + token lifetime |
+| `JWT_TTL_HOURS` | 12 | Session token lifetime |
 
 ---
 
@@ -262,8 +282,7 @@ All knobs are env-driven (see `.env.example`). The most impactful ones:
 2. For each PDF, compute a multi-layer fingerprint:
    • file hash         (SHA-256 of bytes)
    • content hash      (normalized text from first 3 pages + title/author)
-   • metadata hash     (title + author only — weakest, used as fallback)
-3. Check ingest_state.json AND Qdrant payload — skip if any layer matches
+3. Check ingest_state.json AND Qdrant payload — skip if either layer matches
 4. For new/changed files:
    a. Extract page text with PyMuPDF
    b. If page text < 15 chars → EasyOCR fallback (TR + EN)
@@ -275,6 +294,10 @@ All knobs are env-driven (see `.env.example`). The most impactful ones:
 8. Upsert into Qdrant with payload {source, page, type, fingerprint}
 9. Update ingest_state.json
 ```
+
+> 🧹 **Re-ingesting after deletion:** Removing a file from `docs/` is not enough — its fingerprint still lives in Qdrant + `ingest_state.json`, so re-uploading the same content trips the dedup check. Use the sidebar's **Danger zone → Reset knowledge base** button (instructor only) to wipe the Qdrant collection and the state file in one click before a fresh ingest. The reset is gated behind a confirm checkbox so a stray click can't nuke an indexed corpus.
+
+> 🧩 **Why not metadata-only dedup?** A previous version also rejected uploads whose `title + author` matched an existing entry. Real-world PDFs share titles ("Lecture Notes", "Progress Report") between unrelated documents — that check produced false positives, so it was removed (PR #8 review feedback). File-hash + content-hash now cover same-bytes / re-stamped-header cases without the collateral damage.
 
 ---
 
@@ -310,8 +333,37 @@ The retriever fetches `TOP_K` candidates from each channel, fuses ranks with RRF
 When a user asks a question:
 1. The retriever fetches both text chunks AND image summaries from Qdrant
 2. The LLM is instructed to cite relevant images with `[GÖRSEL: filepath]` tags
-3. A regex parser extracts cited paths from the raw LLM output
-4. Only cited images are rendered — no hallucinated or irrelevant visuals
+3. The backend strips citation tags from the streamed answer and emits the cited paths in a dedicated `images` stream event
+4. The frontend pulls each cited image **through the backend with the JWT bearer** (`/ingest/image?path=...`) and hands the bytes to `st.image` — the browser never has to reach an internal Docker hostname or expose the JWT to a `<img src>` GET
+5. Images are cached in-process via `@st.cache_data` so a re-render doesn't re-download every figure
+
+> 🔐 The image endpoint requires any authenticated user (not just instructors). Students see the same figures the LLM cited in their own answers; the path-traversal guard still pins reads to `docs_images/`.
+
+---
+
+## 🎙️ Voice I/O (Türkçe + English)
+
+DeepCampus speaks. Both directions, both languages, all in the browser:
+
+- **Mic-to-text**: the chat pane shows a **🎤 Konuş / Stop** button (powered by `streamlit-mic-recorder` wrapping the browser's `SpeechRecognition` API). Click, speak, the transcript fires as a regular question — the streaming pipeline behind it is unchanged.
+- **Read-aloud**: every assistant message gets a **🔊 Sesli oku** button that invokes `window.speechSynthesis` with the selected language locale. Hit it twice and the second click cancels the first one.
+- **Language toggle**: a sidebar radio (`Türkçe` / `English`) drives both recognition (`tr` / `en`) and synthesis (`tr-TR` / `en-US`).
+
+Audio never leaves the user's machine — no whisper round-trip, no backend audio storage. If `streamlit-mic-recorder` is missing in the image (e.g. Safari private mode), voice degrades silently and the chat text input still works.
+
+---
+
+## 🔒 Session Persistence (F5 fix)
+
+`v2.2` ships the third (and final) take on "stay signed in after a refresh":
+
+1. **Attempt 1**: HTTP cookie via `extra-streamlit-components` iframe → unreliable in Chrome, the iframe boot raced with the cookie read on F5.
+2. **Attempt 2**: stuff `{token, username, role}` into `st.query_params` → it worked, but leaked the JWT through Referer headers, reverse-proxy access logs, and the user's browser history. Textbook OWASP "token in URL" anti-pattern.
+3. **Attempt 3 (current)**: persist the same blob to the browser's **`localStorage`** via `streamlit-local-storage`. localStorage is same-origin, immune to third-party cookie blocking, and survives F5 reliably. The URL stays clean — no JWT in sight.
+
+> 🛡️ **Trade-off.** localStorage is JavaScript-readable on the same origin, so a markup-injection bug would leak the token. We mitigate by escaping all user-controlled output in the Streamlit layer and by keeping JWTs short-lived (12 h default). For a hardened deployment, switch to backend-issued **HttpOnly + Secure** cookies (out of scope for this academic project).
+
+Implementation lives in `frontend/session.py` — `save_cookie / load_cookie / clear_cookie / hydrate_from_cookie` is a stable API; the underlying storage backend swapped under the hood without touching `app.py`'s call sites.
 
 ---
 
@@ -337,6 +389,14 @@ Useful for deciding which model is best suited to your domain / language / VRAM 
 
 ---
 
+## 🧠 Smart Model Dropdown
+
+The sidebar's **Active LLM** picker only lists models that Ollama has actually pulled. Anything in `AVAILABLE_LLMS` that's still missing appears under a **Download more models** expander (instructor only) — pick it, hit Download, and a live progress display streams Ollama's pull events back from `/chat/models/pull`. As soon as the pull completes, the dropdown refreshes.
+
+The match is **tag-aware**: a configured `llama3` is treated as the same model as Ollama's default `llama3:latest`, but size/version variants stay distinct (`llama3:8b` and `llama3:70b` do not collide).
+
+---
+
 ## 🧪 Testing
 
 ```bash
@@ -344,17 +404,18 @@ pip install -r requirements.backend.txt
 pytest tests/ -v
 ```
 
-**22 test cases** covering:
+Test cases cover:
 - bcrypt auth + legacy SHA-256 migration
 - JWT token roundtrip + expiry
 - RRF fusion math (weights, empty inputs, ranking)
-- PDF fingerprint dedup (file / content / metadata layers)
+- PDF fingerprint dedup (file / content layers)
 - Filename sanitization (path traversal, dotfiles, extension fixing)
+- Retriever fusion + context assembly
 - Config env-var overrides
 
 ---
 
-## 🎨 UI Highlights (v2.1)
+## 🎨 UI Highlights (v2.2)
 
 - **Modern dark theme** with amber accent (`#F59E0B`)
 - **System-aware**: a `@media (prefers-color-scheme: light)` block remaps surfaces if your OS is in light mode
@@ -363,7 +424,9 @@ pytest tests/ -v
 - **Welcome screen** with clickable example prompts
 - **Sidebar live status** — indexed docs, model dropdown, TTFT + elapsed after each answer
 - **Sliders with help tooltips** — temperature, top-k, dense/sparse weight
-- **Cookie session** — refresh-proof login (12 h TTL)
+- **Voice section** — TR/EN radio that drives both mic and read-aloud
+- **Danger zone** — confirm-gated "Reset knowledge base" button
+- **localStorage session** — refresh-proof login (12 h TTL), URL stays clean
 - **Enter to submit login**, **auto-scroll** to bottom on new answer
 - **Streaming responses** with token-by-token rendering
 
