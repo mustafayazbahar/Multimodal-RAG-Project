@@ -20,7 +20,7 @@ except Exception:  # noqa: BLE001
 
 # --- 3. LOKAL PROJE İMPORTLARI ---
 from frontend import api_client as api
-# DİKKAT: session (ses) importu tamamen silindi!
+from frontend import session as ses
 from frontend.components import (
     chat_bubble_meta,
     hero,
@@ -159,12 +159,19 @@ for k, v in {
 }.items():
     st.session_state.setdefault(k, v)
 
-# 🚀 MİMARIN DOKUNUŞU: F5 KORUMASI (URL PERSISTENCE)
-# RAM sıfırlansa bile tarayıcı URL'i sıfırlanmaz. State'i URL'den geri yükle.
-if "token" in st.query_params and "user" in st.query_params:
-    st.session_state.token = st.query_params["token"]
-    st.session_state.username = st.query_params["user"]
-    st.session_state.role = st.query_params.get("role", "user")
+# F5 koruması: localStorage'a yazılmış {token, username, role} blob'unu
+# tarayıcıdan geri okur. URL'de hiçbir kimlik bilgisi tutulmuyor — eski
+# query-params yaklaşımı JWT'yi access log + Referer header + tarayıcı
+# geçmişine sızdırıyordu.
+ses.hydrate_from_cookie()
+
+# Eski URL fallback'inden artakalmış paramları temizle. Bir önceki sürümde
+# login token=eyJ... şeklinde URL'e yazılıyordu; kullanıcı pull edip
+# ilk girişini yapana kadar adres çubuğu kirli kalmasın diye yutuyoruz.
+if any(k in st.query_params for k in ("token", "user", "role")):
+    for k in ("token", "user", "role"):
+        if k in st.query_params:
+            del st.query_params[k]
 
 # ────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -190,28 +197,35 @@ def _handle_auth(form_name: str, username: str, password: str) -> None:
     try:
         action = api.register if form_name == "Register" else api.login
         data = action(username, password)
-        
+
         # 1. RAM'e kaydet
         st.session_state.token = data["access_token"]
         st.session_state.role = data["role"]
         st.session_state.username = data["username"]
-        
-        # 2. 🚀 URL'E KAYDET (F5'ten sağ çıkmak için)
-        st.query_params["token"] = data["access_token"]
-        st.query_params["user"] = data["username"]
-        st.query_params["role"] = data["role"]
-        
+
+        # 2. Tarayıcı localStorage'ına kaydet — F5'te tekrar girmek
+        #    yerine session restore edilecek. URL'e hiçbir şey yazmıyoruz.
+        ses.save_cookie(data["access_token"], data["username"], data["role"])
+
         _refresh_models_and_history()
-        st.rerun() 
+        # Localstorage iframe async; rerun'dan önce kısa bir yield
+        # bırakıyoruz ki postMessage tarayıcıya ulaşsın da F5'te
+        # bulunabilsin.
+        time.sleep(0.4)
+        st.rerun()
     except api.ApiError as exc:
         st.error(str(exc))
 
 def _logout() -> None:
-    # 1. RAM'i temizle
+    # 1. localStorage'tan token blob'unu sil — yoksa F5 tekrar oturum
+    #    açacak.
+    ses.clear_cookie()
+
+    # 2. RAM'i temizle
     for key in ("token", "username", "role", "messages", "available_models", "selected_model"):
         st.session_state[key] = [] if key in ("messages", "available_models") else None
-        
-    # 2. 🚀 URL'İ TEMİZLE
+
+    # 3. Eski URL fallback'inden artakalmış paramları da süpür.
     st.query_params.clear()
     st.rerun()
 

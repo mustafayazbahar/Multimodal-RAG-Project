@@ -1,7 +1,14 @@
 streamlit>=1.36,<2.0
 requests>=2.31,<3.0
 python-dotenv>=1.0,<2.0
+# extra-streamlit-components: artık session.py'de kullanılmıyor (cookie
+# iframe Chrome'da kararsızdı). Bağımlı başka modül kalırsa diye pin
+# tutuluyor — gereksiz olduğu kanıtlandığında kaldırılabilir.
 extra-streamlit-components>=0.1.71,<1.0
+# Tarayıcı localStorage'ında F5'e dayanıklı session persistence için —
+# JWT'yi URL'e (Referer/log sızıntısı) ya da iframe cookie'sine (Chrome
+# 3rd-party block riski) bağlamadan tarayıcıda tutar.
+streamlit-local-storage>=0.0.20,<1.0
 # Tarayıcı tabanlı speech-to-text (Web Speech API wrapper) — chat'teki
 # mikrofon butonu için. Ses kullanıcının cihazından çıkmıyor, backend'e
 # whisper round-trip gerekmiyor. TR + EN built-in.
