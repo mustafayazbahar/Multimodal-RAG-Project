@@ -331,15 +331,27 @@ def _extract_pdf(
 
                 # Vektör diyagram kurtarma: Kurose & Ross gibi kitaplarda
                 # diyagramların çoğu raster değil PDF çizgi/şekil primitif'i.
-                # get_images() bunları görmüyor. Sayfada yoğun çizim varsa
-                # ve raster resim çıkmadıysa sayfayı PNG'ye render edip
-                # tek bir "figür" olarak işliyoruz; VLM de tanımlasın diye.
+                # get_images() bunları görmüyor. Ama sayfa çizimlerini körü
+                # körüne saymak da olmuyor — alt çizgi, sütun ayırıcı,
+                # tablo kenarı gibi şeyler de "drawing" olarak geçiyor ve
+                # tüm metin sayfalarını yanlışlıkla render ettiriyor. Bu
+                # yüzden sadece *anlamlı* çizimleri sayıyoruz: her iki
+                # boyutu da ~10pt'den büyük olanlar (kutu, daire, ok
+                # başı). Bu filtre Kurose & Ross referans/dizin
+                # sayfalarını dışarıda tutarken gerçek ağ topoloji
+                # diyagramlarını yakalıyor.
                 if raster_count_this_page == 0:
+                    diagram_drawings = 0
                     try:
-                        drawing_count = len(page.get_drawings())
+                        for d in page.get_drawings():
+                            rect = d.get("rect")
+                            if rect is None:
+                                continue
+                            if min(rect.width, rect.height) >= 10:
+                                diagram_drawings += 1
                     except Exception:  # noqa: BLE001
-                        drawing_count = 0
-                    if drawing_count >= settings.rag.page_render_drawing_threshold:
+                        diagram_drawings = 0
+                    if diagram_drawings >= settings.rag.page_render_drawing_threshold:
                         dpi = settings.rag.page_render_dpi
                         pix = page.get_pixmap(dpi=dpi)
                         png_bytes = pix.tobytes("png")

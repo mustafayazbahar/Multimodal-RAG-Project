@@ -112,12 +112,14 @@ class RAGSettings:
     # 2 KB ile ikon/dekor süzülürken anlamlı diyagramlar yakalanıyor.
     min_image_bytes: int = field(default_factory=lambda: _env_int("MIN_IMAGE_BYTES", 2000))
     min_text_chars: int = field(default_factory=lambda: _env_int("MIN_TEXT_CHARS", 15))
-    # Bir sayfada bu kadar vektör çizim primitif'i varsa ve sayfadan raster
-    # resim çıkmadıysa, sayfayı PNG olarak rasterize edip "figür" gibi
-    # işliyoruz — Kurose & Ross gibi kitaplardaki vektör diyagramları
-    # PyMuPDF'in get_images() yöntemi göremiyor.
+    # Bir sayfada bu kadar *anlamlı* vektör şekil (her iki boyutu da
+    # ~10pt'den büyük kutu/daire/ok) varsa ve sayfadan raster resim
+    # çıkmadıysa, sayfayı PNG olarak rasterize edip "figür" gibi
+    # işliyoruz. İnce alt çizgi/tablo kenarı gibi metin dekorasyonu bu
+    # sayıma dahil değil — bu sayede referans/dizin sayfaları yanlışlıkla
+    # render edilmiyor. 0 yaparsan bu mekanizma tamamen kapanır.
     page_render_drawing_threshold: int = field(
-        default_factory=lambda: _env_int("PAGE_RENDER_DRAWING_THRESHOLD", 20)
+        default_factory=lambda: _env_int("PAGE_RENDER_DRAWING_THRESHOLD", 5)
     )
     page_render_dpi: int = field(default_factory=lambda: _env_int("PAGE_RENDER_DPI", 150))
     temperature: float = field(default_factory=lambda: _env_float("TEMPERATURE", 0.3))
