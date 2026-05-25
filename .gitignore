@@ -1,0 +1,40 @@
+# Environment & secrets
+.env
+.env.local
+
+# Virtualenvs
+venv/
+env/
+.venv/
+
+# Local data & databases
+user.db
+*.sqlite
+*.sqlite3
+docs/
+docs_images/
+ingest_state.json
+data/
+.pytest_data/
+
+# HuggingFace cache (large model weights)
+.cache/
+huggingface/
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp

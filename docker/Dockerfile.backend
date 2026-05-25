@@ -1,0 +1,21 @@
+# DeepCampus backend (FastAPI + ingestion pipeline)
+FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    libgl1 \
+    libglib2.0-0 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.backend.txt .
+RUN pip install --no-cache-dir -r requirements.backend.txt
+
+COPY services/ ./services/
+COPY backend/ ./backend/
+COPY prompts/ ./prompts/
+
+EXPOSE 8000
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,0 +1,66 @@
+{
+  "realm": "deepcampus",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "verifyEmail": false,
+  "resetPasswordAllowed": false,
+  "editUsernameAllowed": false,
+  "bruteForceProtected": true,
+  "permanentLockout": false,
+  "accessTokenLifespan": 43200,
+  "ssoSessionIdleTimeout": 43200,
+  "ssoSessionMaxLifespan": 86400,
+  "clients": [
+    {
+      "clientId": "streamlit-app",
+      "name": "DeepCampus Streamlit Frontend",
+      "enabled": true,
+      "publicClient": true,
+      "directAccessGrantsEnabled": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "serviceAccountsEnabled": false,
+      "fullScopeAllowed": true,
+      "redirectUris": ["*"],
+      "webOrigins": ["*"],
+      "protocol": "openid-connect",
+      "attributes": {
+        "access.token.lifespan": "43200"
+      }
+    }
+  ],
+  "roles": {
+    "realm": [
+      {
+        "name": "instructor",
+        "description": "Can upload PDFs, run ingestion, tune retrieval params, and reset the knowledge base."
+      },
+      {
+        "name": "student",
+        "description": "Can ask questions, see chat history, use voice I/O."
+      }
+    ]
+  },
+  "users": [
+    {
+      "username": "admin",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Default",
+      "lastName": "Admin",
+      "email": "admin@deepcampus.local",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "admin123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["instructor"]
+    }
+  ],
+  "defaultRoles": ["student"]
+}
