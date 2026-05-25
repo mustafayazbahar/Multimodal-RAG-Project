@@ -112,14 +112,25 @@ class RAGSettings:
     # 2 KB ile ikon/dekor süzülürken anlamlı diyagramlar yakalanıyor.
     min_image_bytes: int = field(default_factory=lambda: _env_int("MIN_IMAGE_BYTES", 2000))
     min_text_chars: int = field(default_factory=lambda: _env_int("MIN_TEXT_CHARS", 15))
-    # Vektör diyagramların yakalanması için: sayfada "Figure N", "Şekil N"
-    # gibi figür altyazısı varsa ve sayfadan raster resim çıkmadıysa,
-    # sayfayı PNG olarak rasterize ediyoruz. Eşik tabanlı yaklaşım
-    # referans/dizin sayfalarını yanlış pozitif yakalıyordu; altyazı
-    # sinyali çok daha güvenilir. False yaparsan mekanizma kapanır.
+    # Vektör diyagramların yakalanması için ikili sinyal:
+    #   1) Sayfada "Figure N" / "Şekil N" altyazısı varsa (kitap figürü).
+    #   2) Sayfa "slayt benzeri": metin kısa + en az birkaç anlamlı şekil.
+    # Sadece raster resim çıkmamış sayfalarda değerlendirilir; bu sayede
+    # ders kitabı referans sayfaları (uzun metin, altyazısız) ve slayt
+    # geçiş sayfaları (boş, şekilsiz) yanlış render edilmez.
+    # False yaparsan mekanizma tamamen kapanır.
     page_render_captions_enabled: bool = field(
         default_factory=lambda: _env_str("PAGE_RENDER_CAPTIONS_ENABLED", "true").lower()
         in ("true", "1", "yes", "on")
+    )
+    # Slayt sinyali eşikleri. Slayt sayfası tipik olarak < 400 karakter
+    # metin içeriyor; ders kitabı sayfası 1500+. Şekil sayısı ise gerçek
+    # bir diyagramın en az kutu/daire/ok primitif'i barındırması için.
+    slide_max_text_chars: int = field(
+        default_factory=lambda: _env_int("SLIDE_MAX_TEXT_CHARS", 400)
+    )
+    slide_min_shapes: int = field(
+        default_factory=lambda: _env_int("SLIDE_MIN_SHAPES", 3)
     )
     page_render_dpi: int = field(default_factory=lambda: _env_int("PAGE_RENDER_DPI", 150))
     temperature: float = field(default_factory=lambda: _env_float("TEMPERATURE", 0.3))

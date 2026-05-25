@@ -338,43 +338,57 @@ def _extract_pdf(
                         )
                     )
 
-                # Vektör diyagram kurtarma: yalnızca sayfa metninde figür
-                # altyazısı VARSA (Figure 4.1, Şekil 7, vb.) ve sayfadan
-                # raster resim çıkmadıysa sayfayı PNG'ye render et.
-                # Çizim sayısına bakmak güvensizdi — tablo/dipnot kenarları
-                # da çizim sayılıyor, referans sayfaları yanlış tarıyordu.
-                # Altyazı sinyali ise sadece figür içeren sayfalarda
-                # bulunur, false positive vermez.
-                if (
-                    settings.rag.page_render_captions_enabled
-                    and raster_count_this_page == 0
-                    and text
-                    and _FIGURE_CAPTION_RE.search(text)
-                ):
-                    dpi = settings.rag.page_render_dpi
-                    pix = page.get_pixmap(dpi=dpi)
-                    png_bytes = pix.tobytes("png")
-                    page_img_path = img_folder / f"page_{page_num + 1}_rendered.png"
-                    img_hash = hashlib.md5(png_bytes).hexdigest()
-                    if img_hash not in seen_image_hashes:
-                        seen_image_hashes.add(img_hash)
-                        page_img_path.write_bytes(png_bytes)
-                        summary = _summarize_image(
-                            vlm_model, vlm_tokenizer, page_img_path
-                        )
-                        docs.append(
-                            Document(
-                                page_content=f"[IMAGE SUMMARY]: {summary}",
-                                metadata={
-                                    "source": pdf_path.name,
-                                    "page": page_num,
-                                    "type": "image",
-                                    "image_path": str(page_img_path),
-                                    "fingerprint": fingerprint_hash,
-                                    "rendered_from_vectors": True,
-                                },
+                # Vektör diyagram kurtarma — iki güvenilir sinyal:
+                #   (a) Sayfa metninde figür altyazısı varsa (Figure 4.1,
+                #       Şekil 7) → ders kitaplarındaki figür sayfaları.
+                #   (b) Sayfa "slayt benzeri": metin çok kısa (slaytlarda
+                #       400 karakteri nadir aşar, ders kitabı sayfası
+                #       1500+ olur) ve sayfada en az birkaç anlamlı şekil
+                #       (kutu/daire/ok) var → sunum/slayt sayfaları.
+                # Her iki sinyal de raster resim çıkmamış sayfalarda
+                # değerlendirilir, çünkü zaten resim varsa render gereksiz.
+                if settings.rag.page_render_captions_enabled and raster_count_this_page == 0:
+                    caption_match = bool(text and _FIGURE_CAPTION_RE.search(text))
+                    slide_like = False
+                    if not caption_match and len(text) < settings.rag.slide_max_text_chars:
+                        try:
+                            meaningful_drawings = sum(
+                                1 for d in page.get_drawings()
+                                if (rect := d.get("rect")) is not None
+                                and min(rect.width, rect.height) >= 10
                             )
-                        )
+                        except Exception:  # noqa: BLE001
+                            meaningful_drawings = 0
+                        slide_like = meaningful_drawings >= settings.rag.slide_min_shapes
+
+                    if caption_match or slide_like:
+                        dpi = settings.rag.page_render_dpi
+                        pix = page.get_pixmap(dpi=dpi)
+                        png_bytes = pix.tobytes("png")
+                        page_img_path = img_folder / f"page_{page_num + 1}_rendered.png"
+                        img_hash = hashlib.md5(png_bytes).hexdigest()
+                        if img_hash not in seen_image_hashes:
+                            seen_image_hashes.add(img_hash)
+                            page_img_path.write_bytes(png_bytes)
+                            summary = _summarize_image(
+                                vlm_model, vlm_tokenizer, page_img_path
+                            )
+                            docs.append(
+                                Document(
+                                    page_content=f"[IMAGE SUMMARY]: {summary}",
+                                    metadata={
+                                        "source": pdf_path.name,
+                                        "page": page_num,
+                                        "type": "image",
+                                        "image_path": str(page_img_path),
+                                        "fingerprint": fingerprint_hash,
+                                        "rendered_from_vectors": True,
+                                        "render_reason": (
+                                            "caption" if caption_match else "slide_like"
+                                        ),
+                                    },
+                                )
+                            )
     finally:
         if plumber_doc is not None:
             try:
