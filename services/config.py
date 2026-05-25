@@ -108,50 +108,8 @@ class RAGSettings:
     dense_weight: float = field(default_factory=lambda: _env_float("DENSE_WEIGHT", 0.6))
     sparse_weight: float = field(default_factory=lambda: _env_float("SPARSE_WEIGHT", 0.4))
     rrf_k: int = field(default_factory=lambda: _env_int("RRF_K", 60))
-    # 15 KB filtresi ders kitaplarındaki ufak diyagramları topluca eliyordu;
-    # 2 KB ile ikon/dekor süzülürken anlamlı diyagramlar yakalanıyor.
-    min_image_bytes: int = field(default_factory=lambda: _env_int("MIN_IMAGE_BYTES", 2000))
+    min_image_bytes: int = field(default_factory=lambda: _env_int("MIN_IMAGE_BYTES", 15000))
     min_text_chars: int = field(default_factory=lambda: _env_int("MIN_TEXT_CHARS", 15))
-    # Bölge tabanlı görsel kurtarma: tüm sayfa render etmek yerine her
-    # tablo/diyagram bbox'ı tek tek kırpılıp ayrı PNG olarak kaydedilir.
-    # Referans/dizin sayfaları yanlışlıkla yakalanmaz, çünkü onlarda
-    # tablo veya öbeklenmiş anlamlı vektör şekil yoktur. False yaparsan
-    # iki mekanizma da kapanır.
-    page_render_captions_enabled: bool = field(
-        default_factory=lambda: _env_str("PAGE_RENDER_CAPTIONS_ENABLED", "true").lower()
-        in ("true", "1", "yes", "on")
-    )
-    # Tabloları pdfplumber.find_tables() ile kırp.
-    extract_tables: bool = field(
-        default_factory=lambda: _env_str("EXTRACT_TABLES", "true").lower()
-        in ("true", "1", "yes", "on")
-    )
-    # Vektör diyagramları çizim cluster'larından kırp.
-    extract_figures: bool = field(
-        default_factory=lambda: _env_str("EXTRACT_FIGURES", "true").lower()
-        in ("true", "1", "yes", "on")
-    )
-    # Bir cluster'ın geçerli sayılması için içermesi gereken anlamlı
-    # (her iki boyutu da ≥10pt) şekil sayısı. 3 → tek bir kutu + ok başı
-    # + etiket bile yakalanır; 5 → daha karmaşık diyagramlar.
-    figure_min_shapes: int = field(
-        default_factory=lambda: _env_int("FIGURE_MIN_SHAPES", 3)
-    )
-    # İki çizimi aynı cluster'a koymak için aralarındaki maksimum boşluk.
-    figure_cluster_gap: float = field(
-        default_factory=lambda: float(_env_int("FIGURE_CLUSTER_GAP", 30))
-    )
-    # Kırpılan figürün minimum kenar uzunluğu. Çok ufak öbekler çoğu
-    # zaman dekoratif unsurlar; bunları ele.
-    figure_min_dim: float = field(
-        default_factory=lambda: float(_env_int("FIGURE_MIN_DIM", 60))
-    )
-    # Bulunan bbox'a eklenen padding (puan). Etiket/altyazı çok yakın
-    # olabilir, biraz nefes alanı bıraksın.
-    region_padding: float = field(
-        default_factory=lambda: float(_env_int("REGION_PADDING", 8))
-    )
-    page_render_dpi: int = field(default_factory=lambda: _env_int("PAGE_RENDER_DPI", 150))
     temperature: float = field(default_factory=lambda: _env_float("TEMPERATURE", 0.3))
     history_window: int = field(default_factory=lambda: _env_int("HISTORY_WINDOW", 4))
     ocr_languages: tuple = ("tr", "en")
