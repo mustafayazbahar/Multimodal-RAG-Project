@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import gc
 import hashlib
+import io
 import json
 from pathlib import Path
 
@@ -151,6 +152,45 @@ def _load_ocr(device: str):
     return easyocr.Reader(list(settings.rag.ocr_languages), gpu=device in ("cuda", "mps"), verbose=False)
 
 
+# PDF'lerin içinde sıkça JPEG 2000 (.jp2 / .jpx) gömülü oluyor — özellikle
+# taranmış kitaplarda. Tarayıcılar bu formatı render etmiyor (Chrome dahil
+# desteklemiyor), bu yüzden chat'te resim bozuk görünüyor. Pillow ile
+# açabildiğimiz her şeyi PNG'ye çeviriyoruz; açamazsak orijinal byte'ı
+# yazıp en azından dedup/summary akışına sokuyoruz.
+_BROWSER_SAFE_EXTS = {"png", "jpg", "jpeg", "gif", "webp", "bmp"}
+
+
+def _save_browser_safe_image(image_bytes: bytes, dest_no_ext: Path, fallback_ext: str) -> Path:
+    """Image byte'larını tarayıcıda gösterilebilen bir formatta diske yazar.
+
+    JPX/JP2 gibi PDF'e gömülü ama browser'ın anlamadığı formatları PNG'ye
+    çevirir. Pillow image'i açamazsa orijinal byte'ı orijinal uzantıyla
+    yazıp dosya yolunu döner — VLM çoğu formatı yine de işliyor, sadece
+    chat'te görünmüyor.
+    """
+    ext = fallback_ext.lower().lstrip(".")
+    if ext in _BROWSER_SAFE_EXTS:
+        out = dest_no_ext.with_suffix(f".{ext}")
+        out.write_bytes(image_bytes)
+        return out
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            if img.mode not in ("RGB", "RGBA"):
+                img = img.convert("RGBA" if "A" in img.mode else "RGB")
+            out = dest_no_ext.with_suffix(".png")
+            img.save(out, format="PNG", optimize=True)
+            return out
+    except (OSError, ValueError) as exc:
+        log.warning(
+            "Could not re-encode image to PNG (%s); writing original .%s. "
+            "Browser may not render it.",
+            exc, ext,
+        )
+        out = dest_no_ext.with_suffix(f".{ext}")
+        out.write_bytes(image_bytes)
+        return out
+
+
 def _summarize_image(model, tokenizer, image_path: Path) -> str:
     try:
         image = Image.open(image_path)
@@ -266,9 +306,12 @@ def _extract_pdf(
                         continue
                     seen_image_hashes.add(img_hash)
 
-                    image_name = f"page_{page_num + 1}_img_{img_index + 1}.{base_image['ext']}"
-                    image_path = img_folder / image_name
-                    image_path.write_bytes(image_bytes)
+                    # Uzantıyı verirken yazılan yolu (PNG'ye çevrilmiş
+                    # olabilir) geri al; metadata'ya o yolu koy.
+                    image_stem = img_folder / f"page_{page_num + 1}_img_{img_index + 1}"
+                    image_path = _save_browser_safe_image(
+                        image_bytes, image_stem, base_image["ext"]
+                    )
 
                     summary = _summarize_image(vlm_model, vlm_tokenizer, image_path)
                     docs.append(
