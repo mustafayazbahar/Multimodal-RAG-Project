@@ -50,17 +50,25 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 inject_styles()
 
 # --- 5. GLOBAL DEĞİŞKENLER VE SABİTLER ---
-# Backend, LLM'e cevap sonunda [GÖRSEL: filepath] (veya IMAGE/RESIM/RESİM)
-# formatında alıntı yapmasını söylüyor ve final_answer'a kaydetmeden önce
-# bu etiketleri kırpıyor. Ama canlı streaming sırasında tokenlar ham geliyor;
-# bu yüzden frontend'in de aynı kalıpla süpürmesi gerek — yoksa resim
-# bastırılmadığında ekranda çıplak dosya yolu kalıyor.
-_IMAGE_PATTERN = re.compile(r"\[(?:GÖRSEL|IMAGE|RESIM|RESİM):\s*(.*?)\]", re.IGNORECASE)
-# LLM nadiren etiketi köşeli parantezsiz "Görsel: /path/..." satırı olarak
-# da üretiyor. Resimler zaten ayrı kanaldan (images_buffer / msg.images)
-# bastırıldığı için bu satırları metinden tamamen siliyoruz.
+# Backend, LLM'e cevap sonunda [GÖRSEL: filepath] formatında alıntı yapmasını
+# söylüyor ve final_answer'a kaydetmeden önce bu etiketleri kırpıyor. Ama:
+#   (a) canlı streaming sırasında tokenlar ham geliyor, frontend de
+#       süpürmezse ekranda etiket yazısı kalıyor;
+#   (b) LLM zaman zaman talimatın dışına çıkıp "[IMAGE - Page 43]",
+#       "[USE CASE DİYAGRAMI: IMAGE - Page 12]", "[Figure 3]" gibi
+#       uydurma formatlar üretiyor.
+# Bu yüzden köşeli parantez içinde GÖRSEL/IMAGE/RESIM/FIGÜR/FIGURE/PAGE/SAYFA
+# geçen *her* alıntıyı süpürüyoruz — resimler zaten ayrı bir kanaldan
+# (images_buffer / msg.images) basılıyor, metinde yetim yol bırakmayalım.
+_IMAGE_PATTERN = re.compile(
+    r"\[[^\]\n]*?(?:GÖRSEL|GORSEL|IMAGE|RESIM|RESİM|FIGÜR|FIGURE|SAYFA|PAGE)\b[^\]\n]*?\]",
+    re.IGNORECASE,
+)
+# LLM nadiren etiketi köşeli parantezsiz "Görsel: /path/..." veya
+# "Image: docs_images/foo.png" satırı olarak da üretiyor; bunları da
+# tamamen siliyoruz.
 _BARE_IMAGE_LINE = re.compile(
-    r"(?im)^\s*(?:görsel|gorsel|image|resim|resi̇m)\s*[:\-]\s*\S+.*$"
+    r"(?im)^\s*(?:görsel|gorsel|image|resim|resi̇m|figür|figure|sayfa|page)\s*[:\-]\s*\S+.*$"
 )
 
 # Voice dil eşlemeleri.
