@@ -200,6 +200,136 @@ def _save_browser_safe_image(image_bytes: bytes, dest_no_ext: Path, fallback_ext
         return out
 
 
+def _cluster_drawing_rects(rects: list, gap: float) -> list[list]:
+    """Spatial proximity ile çizim rect'lerini öbeklere ayırır.
+
+    Union-Find: iki rect'in `gap` puan kadar genişletilmiş hali kesişiyorsa
+    aynı öbeğe konur. Bir diyagram dağılmış primitif'lerden oluşur (kutu +
+    bağlantı oku + etiket), bunlar tek bir cluster oluşturur. Birbirinden
+    uzakta duran bağımsız küçük çizimler ayrı cluster kalır.
+    """
+    n = len(rects)
+    if n == 0:
+        return []
+    parent = list(range(n))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for i in range(n):
+        ri = fitz.Rect(
+            rects[i].x0 - gap, rects[i].y0 - gap,
+            rects[i].x1 + gap, rects[i].y1 + gap,
+        )
+        for j in range(i + 1, n):
+            if ri.intersects(rects[j]):
+                union(i, j)
+
+    clusters: dict[int, list] = {}
+    for i in range(n):
+        clusters.setdefault(find(i), []).append(rects[i])
+    return list(clusters.values())
+
+
+def _bbox_union(rects: list) -> "fitz.Rect":
+    """Bir rect listesinin birleşim dikdörtgenini döner."""
+    x0 = min(r.x0 for r in rects)
+    y0 = min(r.y0 for r in rects)
+    x1 = max(r.x1 for r in rects)
+    y1 = max(r.y1 for r in rects)
+    return fitz.Rect(x0, y0, x1, y1)
+
+
+def _find_figure_regions(
+    page,
+    *,
+    min_drawings: int,
+    cluster_gap: float,
+    padding: float,
+    min_dim: float,
+) -> list:
+    """Sayfadaki vektör diyagram bölgelerini bbox listesi olarak döner.
+
+    Yalnızca her iki boyutu da ≥10pt olan "anlamlı" çizimler dikkate
+    alınır (ince alt çizgi/tablo kenarı elenir). Bunlar spatial yakınlığa
+    göre öbeklere bölünür; en az `min_drawings` çizim içeren her öbeğin
+    bbox'ı padding'le birlikte döndürülür.
+    """
+    meaningful: list = []
+    try:
+        for d in page.get_drawings():
+            rect = d.get("rect")
+            if rect is None:
+                continue
+            if min(rect.width, rect.height) >= 10:
+                meaningful.append(rect)
+    except Exception:  # noqa: BLE001
+        return []
+
+    if len(meaningful) < min_drawings:
+        return []
+
+    regions: list = []
+    page_rect = page.rect
+    for cluster in _cluster_drawing_rects(meaningful, gap=cluster_gap):
+        if len(cluster) < min_drawings:
+            continue
+        bbox = _bbox_union(cluster)
+        if bbox.width < min_dim or bbox.height < min_dim:
+            continue
+        padded = fitz.Rect(
+            max(page_rect.x0, bbox.x0 - padding),
+            max(page_rect.y0, bbox.y0 - padding),
+            min(page_rect.x1, bbox.x1 + padding),
+            min(page_rect.y1, bbox.y1 + padding),
+        )
+        regions.append(padded)
+    return regions
+
+
+def _find_table_regions(plumber_doc, page_num: int, padding: float) -> list:
+    """pdfplumber'ın tespit ettiği tablo bbox'larını döner.
+
+    pdfplumber çizgi tabanlı tablo tespiti yapar — kenarlıklı tabloları
+    güvenilir şekilde bulur; kenarlıksız tabloları gözden kaçırabilir.
+    PyMuPDF ile aynı koordinat sistemi (top-left origin).
+    """
+    if plumber_doc is None or page_num >= len(plumber_doc.pages):
+        return []
+    try:
+        plumber_page = plumber_doc.pages[page_num]
+        tables = plumber_page.find_tables()
+    except Exception:  # noqa: BLE001
+        return []
+
+    regions: list = []
+    for table in tables:
+        try:
+            x0, y0, x1, y1 = table.bbox
+        except Exception:  # noqa: BLE001
+            continue
+        regions.append(fitz.Rect(
+            x0 - padding, y0 - padding, x1 + padding, y1 + padding
+        ))
+    return regions
+
+
+def _crop_region_to_png(page, bbox: "fitz.Rect", dest: Path, dpi: int) -> bytes:
+    """Sayfa üzerinde verilen bbox'ı PNG olarak diske yazar ve byte'larını döner."""
+    pix = page.get_pixmap(clip=bbox, dpi=dpi)
+    png_bytes = pix.tobytes("png")
+    dest.write_bytes(png_bytes)
+    return png_bytes
+
+
 def _summarize_image(model, tokenizer, image_path: Path) -> str:
     try:
         image = Image.open(image_path)
@@ -338,57 +468,80 @@ def _extract_pdf(
                         )
                     )
 
-                # Vektör diyagram kurtarma — iki güvenilir sinyal:
-                #   (a) Sayfa metninde figür altyazısı varsa (Figure 4.1,
-                #       Şekil 7) → ders kitaplarındaki figür sayfaları.
-                #   (b) Sayfa "slayt benzeri": metin çok kısa (slaytlarda
-                #       400 karakteri nadir aşar, ders kitabı sayfası
-                #       1500+ olur) ve sayfada en az birkaç anlamlı şekil
-                #       (kutu/daire/ok) var → sunum/slayt sayfaları.
-                # Her iki sinyal de raster resim çıkmamış sayfalarda
-                # değerlendirilir, çünkü zaten resim varsa render gereksiz.
-                if settings.rag.page_render_captions_enabled and raster_count_this_page == 0:
-                    caption_match = bool(text and _FIGURE_CAPTION_RE.search(text))
-                    slide_like = False
-                    if not caption_match and len(text) < settings.rag.slide_max_text_chars:
-                        try:
-                            meaningful_drawings = sum(
-                                1 for d in page.get_drawings()
-                                if (rect := d.get("rect")) is not None
-                                and min(rect.width, rect.height) >= 10
-                            )
-                        except Exception:  # noqa: BLE001
-                            meaningful_drawings = 0
-                        slide_like = meaningful_drawings >= settings.rag.slide_min_shapes
+                # Bölge tabanlı görsel kurtarma: tüm sayfayı render etmek
+                # yerine sadece tablo ve diyagram bbox'larını kırpıyoruz.
+                # Bu sayede:
+                #   - Referans/dizin sayfaları yanlışlıkla yakalanmaz.
+                #   - Bir sayfada birden fazla figür varsa hepsi ayrı
+                #     dosya olarak çıkar.
+                #   - VLM çevresel metni değil sadece figürü görür → daha
+                #     iyi caption.
+                #   - Chat'te resim büyüklüğü makul kalır.
+                if settings.rag.page_render_captions_enabled:
+                    region_specs: list[tuple[str, fitz.Rect]] = []
 
-                    if caption_match or slide_like:
-                        dpi = settings.rag.page_render_dpi
-                        pix = page.get_pixmap(dpi=dpi)
-                        png_bytes = pix.tobytes("png")
-                        page_img_path = img_folder / f"page_{page_num + 1}_rendered.png"
+                    if settings.rag.extract_tables:
+                        for tbl_bbox in _find_table_regions(
+                            plumber_doc, page_num, settings.rag.region_padding
+                        ):
+                            region_specs.append(("table", tbl_bbox))
+
+                    if settings.rag.extract_figures:
+                        for fig_bbox in _find_figure_regions(
+                            page,
+                            min_drawings=settings.rag.figure_min_shapes,
+                            cluster_gap=settings.rag.figure_cluster_gap,
+                            padding=settings.rag.region_padding,
+                            min_dim=settings.rag.figure_min_dim,
+                        ):
+                            region_specs.append(("figure", fig_bbox))
+
+                    kind_counters: dict[str, int] = {}
+                    for kind, bbox in region_specs:
+                        kind_counters[kind] = kind_counters.get(kind, 0) + 1
+                        region_path = (
+                            img_folder
+                            / f"page_{page_num + 1}_{kind}_{kind_counters[kind]}.png"
+                        )
+                        try:
+                            png_bytes = _crop_region_to_png(
+                                page, bbox, region_path,
+                                dpi=settings.rag.page_render_dpi,
+                            )
+                        except (RuntimeError, ValueError) as exc:
+                            log.warning(
+                                "Could not crop %s region on page %d of %s: %s",
+                                kind, page_num + 1, pdf_path.name, exc,
+                            )
+                            continue
+
                         img_hash = hashlib.md5(png_bytes).hexdigest()
-                        if img_hash not in seen_image_hashes:
-                            seen_image_hashes.add(img_hash)
-                            page_img_path.write_bytes(png_bytes)
-                            summary = _summarize_image(
-                                vlm_model, vlm_tokenizer, page_img_path
+                        if img_hash in seen_image_hashes:
+                            # Aynı resmi zaten kaydettik — silip geç.
+                            try:
+                                region_path.unlink()
+                            except OSError:
+                                pass
+                            continue
+                        seen_image_hashes.add(img_hash)
+
+                        summary = _summarize_image(
+                            vlm_model, vlm_tokenizer, region_path
+                        )
+                        docs.append(
+                            Document(
+                                page_content=f"[IMAGE SUMMARY]: {summary}",
+                                metadata={
+                                    "source": pdf_path.name,
+                                    "page": page_num,
+                                    "type": "image",
+                                    "image_path": str(region_path),
+                                    "fingerprint": fingerprint_hash,
+                                    "rendered_from_vectors": True,
+                                    "render_reason": kind,
+                                },
                             )
-                            docs.append(
-                                Document(
-                                    page_content=f"[IMAGE SUMMARY]: {summary}",
-                                    metadata={
-                                        "source": pdf_path.name,
-                                        "page": page_num,
-                                        "type": "image",
-                                        "image_path": str(page_img_path),
-                                        "fingerprint": fingerprint_hash,
-                                        "rendered_from_vectors": True,
-                                        "render_reason": (
-                                            "caption" if caption_match else "slide_like"
-                                        ),
-                                    },
-                                )
-                            )
+                        )
     finally:
         if plumber_doc is not None:
             try:

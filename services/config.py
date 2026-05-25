@@ -112,25 +112,44 @@ class RAGSettings:
     # 2 KB ile ikon/dekor süzülürken anlamlı diyagramlar yakalanıyor.
     min_image_bytes: int = field(default_factory=lambda: _env_int("MIN_IMAGE_BYTES", 2000))
     min_text_chars: int = field(default_factory=lambda: _env_int("MIN_TEXT_CHARS", 15))
-    # Vektör diyagramların yakalanması için ikili sinyal:
-    #   1) Sayfada "Figure N" / "Şekil N" altyazısı varsa (kitap figürü).
-    #   2) Sayfa "slayt benzeri": metin kısa + en az birkaç anlamlı şekil.
-    # Sadece raster resim çıkmamış sayfalarda değerlendirilir; bu sayede
-    # ders kitabı referans sayfaları (uzun metin, altyazısız) ve slayt
-    # geçiş sayfaları (boş, şekilsiz) yanlış render edilmez.
-    # False yaparsan mekanizma tamamen kapanır.
+    # Bölge tabanlı görsel kurtarma: tüm sayfa render etmek yerine her
+    # tablo/diyagram bbox'ı tek tek kırpılıp ayrı PNG olarak kaydedilir.
+    # Referans/dizin sayfaları yanlışlıkla yakalanmaz, çünkü onlarda
+    # tablo veya öbeklenmiş anlamlı vektör şekil yoktur. False yaparsan
+    # iki mekanizma da kapanır.
     page_render_captions_enabled: bool = field(
         default_factory=lambda: _env_str("PAGE_RENDER_CAPTIONS_ENABLED", "true").lower()
         in ("true", "1", "yes", "on")
     )
-    # Slayt sinyali eşikleri. Slayt sayfası tipik olarak < 400 karakter
-    # metin içeriyor; ders kitabı sayfası 1500+. Şekil sayısı ise gerçek
-    # bir diyagramın en az kutu/daire/ok primitif'i barındırması için.
-    slide_max_text_chars: int = field(
-        default_factory=lambda: _env_int("SLIDE_MAX_TEXT_CHARS", 400)
+    # Tabloları pdfplumber.find_tables() ile kırp.
+    extract_tables: bool = field(
+        default_factory=lambda: _env_str("EXTRACT_TABLES", "true").lower()
+        in ("true", "1", "yes", "on")
     )
-    slide_min_shapes: int = field(
-        default_factory=lambda: _env_int("SLIDE_MIN_SHAPES", 3)
+    # Vektör diyagramları çizim cluster'larından kırp.
+    extract_figures: bool = field(
+        default_factory=lambda: _env_str("EXTRACT_FIGURES", "true").lower()
+        in ("true", "1", "yes", "on")
+    )
+    # Bir cluster'ın geçerli sayılması için içermesi gereken anlamlı
+    # (her iki boyutu da ≥10pt) şekil sayısı. 3 → tek bir kutu + ok başı
+    # + etiket bile yakalanır; 5 → daha karmaşık diyagramlar.
+    figure_min_shapes: int = field(
+        default_factory=lambda: _env_int("FIGURE_MIN_SHAPES", 3)
+    )
+    # İki çizimi aynı cluster'a koymak için aralarındaki maksimum boşluk.
+    figure_cluster_gap: float = field(
+        default_factory=lambda: float(_env_int("FIGURE_CLUSTER_GAP", 30))
+    )
+    # Kırpılan figürün minimum kenar uzunluğu. Çok ufak öbekler çoğu
+    # zaman dekoratif unsurlar; bunları ele.
+    figure_min_dim: float = field(
+        default_factory=lambda: float(_env_int("FIGURE_MIN_DIM", 60))
+    )
+    # Bulunan bbox'a eklenen padding (puan). Etiket/altyazı çok yakın
+    # olabilir, biraz nefes alanı bıraksın.
+    region_padding: float = field(
+        default_factory=lambda: float(_env_int("REGION_PADDING", 8))
     )
     page_render_dpi: int = field(default_factory=lambda: _env_int("PAGE_RENDER_DPI", 150))
     temperature: float = field(default_factory=lambda: _env_float("TEMPERATURE", 0.3))
