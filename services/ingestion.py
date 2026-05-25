@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 
 import fitz  # PyMuPDF
+import pdfplumber
 import torch
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -164,6 +165,35 @@ def _summarize_image(model, tokenizer, image_path: Path) -> str:
         return "Image content could not be analyzed."
 
 
+def _plumber_page_text(plumber_doc, page_num: int) -> str:
+    """pdfplumber ile tek bir sayfanın metnini çek; varsa tabloları da
+    Markdown benzeri satır biçimine ekle.
+
+    PyMuPDF tablolarda zayıf; pdfplumber satır/kolon hizalamasını daha iyi
+    çözüyor. Tablolar `| col | col |` satırları olarak ekleniyor ki
+    chunker ve BGE-M3 anlamlı tokenlar görsün.
+    """
+    if plumber_doc is None or page_num >= len(plumber_doc.pages):
+        return ""
+    page = plumber_doc.pages[page_num]
+    parts: list[str] = []
+    page_text = (page.extract_text() or "").strip()
+    if page_text:
+        parts.append(page_text)
+    try:
+        for table in page.extract_tables() or []:
+            rows = [
+                "| " + " | ".join((cell or "").strip() for cell in row) + " |"
+                for row in table
+                if any((cell or "").strip() for cell in row)
+            ]
+            if rows:
+                parts.append("\n".join(rows))
+    except (ValueError, IndexError) as exc:
+        log.debug("pdfplumber table extraction skipped on page %d: %s", page_num, exc)
+    return "\n\n".join(parts).strip()
+
+
 def _extract_pdf(
     pdf_path: Path,
     fingerprint_hash: str,
@@ -176,56 +206,89 @@ def _extract_pdf(
     img_folder = img_root / pdf_path.stem
     img_folder.mkdir(parents=True, exist_ok=True)
 
-    with fitz.open(pdf_path) as pdf:
-        seen_image_hashes: set[str] = set()
-        for page_num in range(len(pdf)):
-            page = pdf[page_num]
-            text = page.get_text("text").strip()
-            if len(text) < settings.rag.min_text_chars:
-                pix = page.get_pixmap()
-                ocr_results = ocr_reader.readtext(pix.tobytes("png"), detail=0, paragraph=True)
-                text = "\n".join(ocr_results).strip()
-            if text:
-                docs.append(
-                    Document(
-                        page_content=text,
-                        metadata={
-                            "source": pdf_path.name,
-                            "page": page_num,
-                            "type": "text",
-                            "fingerprint": fingerprint_hash,
-                        },
+    # pdfplumber'ı tüm PDF için bir kere aç — sayfa başına yeniden açmak
+    # pahalı. Açılamazsa (bozuk PDF, şifreli, vb.) sessizce None bırak ve
+    # fallback'leri devre dışı say.
+    try:
+        plumber_doc = pdfplumber.open(pdf_path)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("pdfplumber could not open %s: %s — falling back to PyMuPDF/OCR only.",
+                    pdf_path.name, exc)
+        plumber_doc = None
+
+    try:
+        with fitz.open(pdf_path) as pdf:
+            seen_image_hashes: set[str] = set()
+            for page_num in range(len(pdf)):
+                page = pdf[page_num]
+                text = page.get_text("text").strip()
+
+                # Katmanlı fallback:
+                #   1. PyMuPDF metni yeterliyse onu kullan.
+                #   2. Yetersizse pdfplumber'a sor (tablolar dahil).
+                #   3. O da yetersizse OCR'a düş.
+                if len(text) < settings.rag.min_text_chars:
+                    plumber_text = _plumber_page_text(plumber_doc, page_num)
+                    if len(plumber_text) >= settings.rag.min_text_chars:
+                        text = plumber_text
+                    else:
+                        pix = page.get_pixmap()
+                        ocr_results = ocr_reader.readtext(
+                            pix.tobytes("png"), detail=0, paragraph=True
+                        )
+                        text = "\n".join(ocr_results).strip()
+                        # OCR de boş döndüyse en azından pdfplumber'ın
+                        # kısa çıktısını kaybetmeyelim.
+                        if not text and plumber_text:
+                            text = plumber_text
+
+                if text:
+                    docs.append(
+                        Document(
+                            page_content=text,
+                            metadata={
+                                "source": pdf_path.name,
+                                "page": page_num,
+                                "type": "text",
+                                "fingerprint": fingerprint_hash,
+                            },
+                        )
                     )
-                )
 
-            for img_index, img in enumerate(page.get_images(full=True)):
-                xref = img[0]
-                base_image = pdf.extract_image(xref)
-                image_bytes = base_image["image"]
-                if len(image_bytes) < settings.rag.min_image_bytes:
-                    continue
-                img_hash = hashlib.md5(image_bytes).hexdigest()
-                if img_hash in seen_image_hashes:
-                    continue
-                seen_image_hashes.add(img_hash)
+                for img_index, img in enumerate(page.get_images(full=True)):
+                    xref = img[0]
+                    base_image = pdf.extract_image(xref)
+                    image_bytes = base_image["image"]
+                    if len(image_bytes) < settings.rag.min_image_bytes:
+                        continue
+                    img_hash = hashlib.md5(image_bytes).hexdigest()
+                    if img_hash in seen_image_hashes:
+                        continue
+                    seen_image_hashes.add(img_hash)
 
-                image_name = f"page_{page_num + 1}_img_{img_index + 1}.{base_image['ext']}"
-                image_path = img_folder / image_name
-                image_path.write_bytes(image_bytes)
+                    image_name = f"page_{page_num + 1}_img_{img_index + 1}.{base_image['ext']}"
+                    image_path = img_folder / image_name
+                    image_path.write_bytes(image_bytes)
 
-                summary = _summarize_image(vlm_model, vlm_tokenizer, image_path)
-                docs.append(
-                    Document(
-                        page_content=f"[IMAGE SUMMARY]: {summary}",
-                        metadata={
-                            "source": pdf_path.name,
-                            "page": page_num,
-                            "type": "image",
-                            "image_path": str(image_path),
-                            "fingerprint": fingerprint_hash,
-                        },
+                    summary = _summarize_image(vlm_model, vlm_tokenizer, image_path)
+                    docs.append(
+                        Document(
+                            page_content=f"[IMAGE SUMMARY]: {summary}",
+                            metadata={
+                                "source": pdf_path.name,
+                                "page": page_num,
+                                "type": "image",
+                                "image_path": str(image_path),
+                                "fingerprint": fingerprint_hash,
+                            },
+                        )
                     )
-                )
+    finally:
+        if plumber_doc is not None:
+            try:
+                plumber_doc.close()
+            except Exception:  # noqa: BLE001
+                pass
     return docs
 
 

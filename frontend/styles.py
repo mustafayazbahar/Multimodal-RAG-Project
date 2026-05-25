@@ -1,18 +1,19 @@
 """CSS injection for the DeepCampus UI.
 
-Design language:
-- Dark base, amber accent (#F59E0B) — academic / warm AI tooling.
-- System-aware: an @media (prefers-color-scheme: light) block remaps surfaces
-  so users on a light OS still get readable contrast.
+Theme:
+- Explicit dark / light themes. The active theme is chosen by the caller
+  (Streamlit session state) and baked into :root variables — no @media
+  detection, no half-rendered light mode.
+- Amber accent (#F59E0B) preserved in both themes.
 - Subtle glassmorphism on cards, soft shadows, smooth transitions.
 """
 from __future__ import annotations
 
 import streamlit as st
 
-_CSS = r"""
-<style>
-:root {
+# Tek tek varyasyonlar :root içine gömülüyor; iki tema arasında geçiş
+# yapmak için inject_styles(theme=...) çağrısı yeniden CSS basıyor.
+_VARS_DARK = """
   --accent: #F59E0B;
   --accent-strong: #D97706;
   --accent-soft: rgba(245, 158, 11, 0.12);
@@ -24,6 +25,7 @@ _CSS = r"""
   --border: #2A2A33;
   --text: #FAFAFA;
   --text-muted: #A1A1AA;
+  --on-accent: #18181B;
   --success: #10B981;
   --danger: #EF4444;
   --info: #38BDF8;
@@ -31,29 +33,49 @@ _CSS = r"""
   --radius: 14px;
   --radius-sm: 10px;
   --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-}
+"""
 
-@media (prefers-color-scheme: light) {
-  :root {
-    --bg: #FAFAF9;
-    --surface: #FFFFFF;
-    --surface-2: #F4F4F2;
-    --border: #E7E5E0;
-    --text: #18181B;
-    --text-muted: #52525B;
-    --shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
-  }
-  .stApp { background: var(--bg) !important; color: var(--text) !important; }
-  section[data-testid="stSidebar"] { background: var(--surface) !important; }
-}
+_VARS_LIGHT = """
+  --accent: #D97706;
+  --accent-strong: #B45309;
+  --accent-soft: rgba(217, 119, 6, 0.12);
+  --accent-glow: rgba(217, 119, 6, 0.28);
 
+  --bg: #FAFAF9;
+  --surface: #FFFFFF;
+  --surface-2: #F4F4F2;
+  --border: #E4E4E7;
+  --text: #18181B;
+  --text-muted: #52525B;
+  --on-accent: #FFFFFF;
+  --success: #047857;
+  --danger: #B91C1C;
+  --info: #0369A1;
+
+  --radius: 14px;
+  --radius-sm: 10px;
+  --shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+"""
+
+_CSS_BODY = r"""
 /* ───────── Global ───────── */
 html, body, .stApp {
   font-family: 'Inter', 'SF Pro Text', -apple-system, BlinkMacSystemFont,
                'Segoe UI', Roboto, sans-serif;
   letter-spacing: -0.005em;
 }
-.stApp { background: var(--bg); }
+.stApp { background: var(--bg) !important; color: var(--text) !important; }
+
+/* Streamlit'in kendi açık modunda bile koyu okunabilirlik kalsın diye
+   ana metin renklerini global olarak zorluyoruz. */
+.stApp, .stMarkdown, .stMarkdown p, .stMarkdown li, .stMarkdown span,
+.stChatMessage, .stChatMessage p, .stChatMessage li, .stChatMessage span,
+[data-testid="stMarkdownContainer"] p, [data-testid="stMarkdownContainer"] li,
+[data-testid="stMarkdownContainer"] span,
+label, .stCaption, .stCheckbox label, .stRadio label {
+  color: var(--text) !important;
+}
+.stCaption, .stCaption * { color: var(--text-muted) !important; }
 
 /* Don't touch Material Symbols / Material Icons spans — they need their
    own font-family to render the icon ligatures. */
@@ -68,15 +90,16 @@ header[data-testid="stHeader"] { background: transparent; }
 
 /* ───────── Sidebar ───────── */
 section[data-testid="stSidebar"] {
-  background: linear-gradient(180deg, var(--surface) 0%, var(--bg) 100%);
+  background: linear-gradient(180deg, var(--surface) 0%, var(--bg) 100%) !important;
   border-right: 1px solid var(--border);
 }
+section[data-testid="stSidebar"] * { color: var(--text); }
 section[data-testid="stSidebar"] .sidebar-section-title {
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: var(--text-muted);
+  color: var(--text-muted) !important;
   margin: 1rem 0 0.5rem 0;
 }
 
@@ -97,7 +120,7 @@ section[data-testid="stSidebar"] .sidebar-section-title {
 .stButton > button[kind="primary"], .stFormSubmitButton > button {
   background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%) !important;
   border: 1px solid var(--accent) !important;
-  color: #18181B !important;
+  color: var(--on-accent) !important;
   font-weight: 600 !important;
 }
 .stButton > button[kind="primary"]:hover, .stFormSubmitButton > button:hover {
@@ -141,6 +164,17 @@ section[data-testid="stSidebar"] .sidebar-section-title {
   border: 1px solid var(--accent) !important;
 }
 
+/* Chat içindeki resimleri makul bir boyda tut — full container width
+   chat genişliğini olduğu gibi kapatıyordu. */
+.stChatMessage [data-testid="stImage"] img,
+.stChatMessage img {
+  max-width: 420px !important;
+  width: 100% !important;
+  height: auto !important;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+
 /* Chat input — sticky, glassy, glow on focus */
 [data-testid="stChatInput"] {
   background: var(--surface) !important;
@@ -175,6 +209,11 @@ div[data-testid="stVerticalBlockBorderWrapper"]:hover {
   border: 1px solid var(--border) !important;
   border-radius: var(--radius-sm) !important;
   font-weight: 500 !important;
+  color: var(--text) !important;
+}
+[data-testid="stExpander"] [data-testid="stExpanderDetails"] {
+  background: var(--surface) !important;
+  color: var(--text) !important;
 }
 
 /* ───────── Alerts ───────── */
@@ -193,7 +232,7 @@ div[data-testid="stVerticalBlockBorderWrapper"]:hover {
   margin-bottom: 1.25rem;
 }
 .dc-hero h1 {
-  background: linear-gradient(135deg, var(--accent) 0%, #FBBF24 100%);
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
@@ -237,6 +276,7 @@ div[data-testid="stVerticalBlockBorderWrapper"]:hover {
   border-radius: var(--radius-sm);
   margin-bottom: 0.4rem;
   font-size: 0.85rem;
+  color: var(--text);
   transition: all 0.15s ease;
 }
 .dc-source-card:hover {
@@ -289,6 +329,13 @@ div[data-testid="stVerticalBlockBorderWrapper"]:hover {
   margin-left: 0.5rem;
 }
 
+/* Tema geçiş butonu */
+.dc-theme-toggle-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 0.25rem;
+}
+
 /* ───────── Scrollbar ───────── */
 *::-webkit-scrollbar { width: 10px; height: 10px; }
 *::-webkit-scrollbar-track { background: transparent; }
@@ -308,13 +355,14 @@ div[data-testid="stVerticalBlockBorderWrapper"]:hover {
 .stChatMessage, .dc-source-card, .dc-suggest-card, .dc-hero {
   animation: dc-fade-in 0.25s ease-out;
 }
-</style>
 """
 
 
-def inject_styles() -> None:
-    """Inject the project's CSS once per page."""
-    st.markdown(_CSS, unsafe_allow_html=True)
+def inject_styles(theme: str = "dark") -> None:
+    """Inject the project's CSS with the requested theme baked in."""
+    variables = _VARS_LIGHT if theme == "light" else _VARS_DARK
+    css = f"<style>:root {{{variables}}}\n{_CSS_BODY}</style>"
+    st.markdown(css, unsafe_allow_html=True)
 
 
 def scroll_to_bottom() -> None:

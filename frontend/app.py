@@ -45,9 +45,12 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Çevre değişkenleri ve stil enjeksiyonu
+# Çevre değişkenleri ve stil enjeksiyonu. Tema seçimi session_state'ten
+# okunuyor; toggle butonuna basıldığında rerun ile yeni CSS basılıyor.
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-inject_styles()
+if "theme" not in st.session_state:
+    st.session_state["theme"] = "dark"
+inject_styles(st.session_state["theme"])
 
 # --- 5. GLOBAL DEĞİŞKENLER VE SABİTLER ---
 # Backend, LLM'e cevap sonunda [GÖRSEL: filepath] formatında alıntı yapmasını
@@ -115,9 +118,28 @@ def _speak_button(text: str, lang_tag: str, key: str) -> None:
     )
 
 # --- 6. YARDIMCI FONKSİYONLAR ---
+# Chat içinde gösterilen resimlerin maksimum genişliği (px). Eskiden
+# use_container_width=True ile basılıyordu, bu da resimleri sohbet
+# baloncuğu kadar büyütüp ekranı boğuyordu. CSS de aynı tavanı uyguluyor
+# — buradaki parametre Streamlit'in piksel cinsinden render boyutu.
+_IMAGE_MAX_WIDTH = 420
+
+
+def _render_image_blob(blob: bytes) -> None:
+    """Resmi makul bir boyutta basar; ekranı kaplamasını engeller."""
+    st.image(blob, width=_IMAGE_MAX_WIDTH)
+
+
 @st.cache_data(show_spinner=False, ttl=3600, max_entries=64)
 def _cached_image_bytes(token: str, img_path: str) -> bytes | None:
     return api.fetch_image_bytes(token, img_path)
+
+
+def _toggle_theme() -> None:
+    """Aktif temayı dark <-> light arasında çevirir."""
+    st.session_state["theme"] = (
+        "light" if st.session_state.get("theme", "dark") == "dark" else "dark"
+    )
 
 def _render_content_with_images(text: str) -> None:
     """LLM'den gelen ham metni sanitize eder; resimleri DEĞİL, sadece metni basar.
@@ -150,7 +172,7 @@ def _render_messages() -> None:
                         continue
                     blob = _cached_image_bytes(st.session_state.token, img_path)
                     if blob:
-                        st.image(blob, use_container_width=True)
+                        _render_image_blob(blob)
                 if msg.get("sources"):
                     with st.expander("View sources", expanded=False):
                         source_cards(msg["sources"])
@@ -329,6 +351,21 @@ if not _logged_in():
 # Sidebar
 # ────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
+    # Tema toggle — en üstte, küçük ve dikkat dağıtmadan. Butona basınca
+    # session_state'teki "theme" anahtarı dönüyor, rerun ile inject_styles
+    # yeni varyantı basıyor.
+    theme_label = (
+        "☀️ Açık tema" if st.session_state.get("theme", "dark") == "dark"
+        else "🌙 Koyu tema"
+    )
+    st.button(
+        theme_label,
+        key="theme_toggle",
+        on_click=_toggle_theme,
+        use_container_width=True,
+        help="Açık ve koyu tema arasında geçiş yap.",
+    )
+
     st.markdown("### DeepCampus")
     st.markdown(
         status_pill(f"{st.session_state.username} · {st.session_state.role}"),
@@ -455,8 +492,9 @@ with st.sidebar:
                     )
                     st.text(item.get("image_path", ""))
                     st.markdown(
-                        f"<div style='color:#a1a1aa;font-size:0.85rem;"
-                        f"padding:6px 8px;background:#1e1e26;border-radius:6px;"
+                        f"<div style='color:var(--text-muted);font-size:0.85rem;"
+                        f"padding:6px 8px;background:var(--surface-2);"
+                        f"border:1px solid var(--border);border-radius:6px;"
                         f"margin:4px 0 12px 0'>{item.get('summary', '')}</div>",
                         unsafe_allow_html=True,
                     )
@@ -620,7 +658,7 @@ if user_query:
                     continue
                 blob = _cached_image_bytes(st.session_state.token, img_path)
                 if blob:
-                    st.image(blob, use_container_width=True)
+                    _render_image_blob(blob)
 
             if sources_buffer:
                 with st.expander("View sources", expanded=False):

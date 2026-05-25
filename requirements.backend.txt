@@ -17,6 +17,10 @@ requests>=2.31,<3.0
 
 # --- PDF & image processing ---
 PyMuPDF>=1.24,<2.0
+# pdfplumber, PyMuPDF'in zayıf kaldığı durumlarda (tablo ağırlıklı veya
+# garip metin akışlı PDF'ler) ikinci bir denek olarak kullanılıyor; OCR'a
+# düşmeden önce daha temiz metin yakalama şansı veriyor.
+pdfplumber>=0.11,<1.0
 Pillow>=10.0,<12.0
 easyocr>=1.7,<2.0
 
