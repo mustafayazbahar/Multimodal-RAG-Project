@@ -14,6 +14,7 @@ import gc
 import hashlib
 import io
 import json
+import re
 from pathlib import Path
 
 import fitz  # PyMuPDF
@@ -158,6 +159,14 @@ def _load_ocr(device: str):
 # açabildiğimiz her şeyi PNG'ye çeviriyoruz; açamazsak orijinal byte'ı
 # yazıp en azından dedup/summary akışına sokuyoruz.
 _BROWSER_SAFE_EXTS = {"png", "jpg", "jpeg", "gif", "webp", "bmp"}
+
+# Sayfa metninde figür altyazısı arayan regex. "Figure 4.1:", "Fig. 12",
+# "Şekil 3.2", "Şekil 7:" gibi varyantları yakalar. Bu en güvenilir
+# diyagram göstergesi — eşik tabanlı yaklaşım referans sayfalarını yanlış
+# tarıyordu; figür altyazısı yalnızca gerçek figür sayfalarında bulunur.
+_FIGURE_CAPTION_RE = re.compile(
+    r"(?im)\b(?:figure|fig\.?|şekil|sekil)\s*\d+(?:[\.\:\-]\s*\d+)*\b"
+)
 
 
 def _save_browser_safe_image(image_bytes: bytes, dest_no_ext: Path, fallback_ext: str) -> Path:
@@ -329,53 +338,43 @@ def _extract_pdf(
                         )
                     )
 
-                # Vektör diyagram kurtarma: Kurose & Ross gibi kitaplarda
-                # diyagramların çoğu raster değil PDF çizgi/şekil primitif'i.
-                # get_images() bunları görmüyor. Ama sayfa çizimlerini körü
-                # körüne saymak da olmuyor — alt çizgi, sütun ayırıcı,
-                # tablo kenarı gibi şeyler de "drawing" olarak geçiyor ve
-                # tüm metin sayfalarını yanlışlıkla render ettiriyor. Bu
-                # yüzden sadece *anlamlı* çizimleri sayıyoruz: her iki
-                # boyutu da ~10pt'den büyük olanlar (kutu, daire, ok
-                # başı). Bu filtre Kurose & Ross referans/dizin
-                # sayfalarını dışarıda tutarken gerçek ağ topoloji
-                # diyagramlarını yakalıyor.
-                if raster_count_this_page == 0:
-                    diagram_drawings = 0
-                    try:
-                        for d in page.get_drawings():
-                            rect = d.get("rect")
-                            if rect is None:
-                                continue
-                            if min(rect.width, rect.height) >= 10:
-                                diagram_drawings += 1
-                    except Exception:  # noqa: BLE001
-                        diagram_drawings = 0
-                    if diagram_drawings >= settings.rag.page_render_drawing_threshold:
-                        dpi = settings.rag.page_render_dpi
-                        pix = page.get_pixmap(dpi=dpi)
-                        png_bytes = pix.tobytes("png")
-                        page_img_path = img_folder / f"page_{page_num + 1}_rendered.png"
-                        img_hash = hashlib.md5(png_bytes).hexdigest()
-                        if img_hash not in seen_image_hashes:
-                            seen_image_hashes.add(img_hash)
-                            page_img_path.write_bytes(png_bytes)
-                            summary = _summarize_image(
-                                vlm_model, vlm_tokenizer, page_img_path
+                # Vektör diyagram kurtarma: yalnızca sayfa metninde figür
+                # altyazısı VARSA (Figure 4.1, Şekil 7, vb.) ve sayfadan
+                # raster resim çıkmadıysa sayfayı PNG'ye render et.
+                # Çizim sayısına bakmak güvensizdi — tablo/dipnot kenarları
+                # da çizim sayılıyor, referans sayfaları yanlış tarıyordu.
+                # Altyazı sinyali ise sadece figür içeren sayfalarda
+                # bulunur, false positive vermez.
+                if (
+                    settings.rag.page_render_captions_enabled
+                    and raster_count_this_page == 0
+                    and text
+                    and _FIGURE_CAPTION_RE.search(text)
+                ):
+                    dpi = settings.rag.page_render_dpi
+                    pix = page.get_pixmap(dpi=dpi)
+                    png_bytes = pix.tobytes("png")
+                    page_img_path = img_folder / f"page_{page_num + 1}_rendered.png"
+                    img_hash = hashlib.md5(png_bytes).hexdigest()
+                    if img_hash not in seen_image_hashes:
+                        seen_image_hashes.add(img_hash)
+                        page_img_path.write_bytes(png_bytes)
+                        summary = _summarize_image(
+                            vlm_model, vlm_tokenizer, page_img_path
+                        )
+                        docs.append(
+                            Document(
+                                page_content=f"[IMAGE SUMMARY]: {summary}",
+                                metadata={
+                                    "source": pdf_path.name,
+                                    "page": page_num,
+                                    "type": "image",
+                                    "image_path": str(page_img_path),
+                                    "fingerprint": fingerprint_hash,
+                                    "rendered_from_vectors": True,
+                                },
                             )
-                            docs.append(
-                                Document(
-                                    page_content=f"[IMAGE SUMMARY]: {summary}",
-                                    metadata={
-                                        "source": pdf_path.name,
-                                        "page": page_num,
-                                        "type": "image",
-                                        "image_path": str(page_img_path),
-                                        "fingerprint": fingerprint_hash,
-                                        "rendered_from_vectors": True,
-                                    },
-                                )
-                            )
+                        )
     finally:
         if plumber_doc is not None:
             try:
