@@ -50,7 +50,18 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 inject_styles()
 
 # --- 5. GLOBAL DEĞİŞKENLER VE SABİTLER ---
-_IMAGE_PATTERN = re.compile(r"\[IMAGE SUMMARY - ID:\s*(.*?)\]")
+# Backend, LLM'e cevap sonunda [GÖRSEL: filepath] (veya IMAGE/RESIM/RESİM)
+# formatında alıntı yapmasını söylüyor ve final_answer'a kaydetmeden önce
+# bu etiketleri kırpıyor. Ama canlı streaming sırasında tokenlar ham geliyor;
+# bu yüzden frontend'in de aynı kalıpla süpürmesi gerek — yoksa resim
+# bastırılmadığında ekranda çıplak dosya yolu kalıyor.
+_IMAGE_PATTERN = re.compile(r"\[(?:GÖRSEL|IMAGE|RESIM|RESİM):\s*(.*?)\]", re.IGNORECASE)
+# LLM nadiren etiketi köşeli parantezsiz "Görsel: /path/..." satırı olarak
+# da üretiyor. Resimler zaten ayrı kanaldan (images_buffer / msg.images)
+# bastırıldığı için bu satırları metinden tamamen siliyoruz.
+_BARE_IMAGE_LINE = re.compile(
+    r"(?im)^\s*(?:görsel|gorsel|image|resim|resi̇m)\s*[:\-]\s*\S+.*$"
+)
 
 # Voice dil eşlemeleri.
 def _stt_lang_code(label: str) -> str:
@@ -101,18 +112,18 @@ def _cached_image_bytes(token: str, img_path: str) -> bytes | None:
     return api.fetch_image_bytes(token, img_path)
 
 def _render_content_with_images(text: str) -> None:
-    """LLM'den gelen ham metni sanitize eder ve resimleri renderlar."""
-    clean_text = _IMAGE_PATTERN.sub("", text).strip()
+    """LLM'den gelen ham metni sanitize eder; resimleri DEĞİL, sadece metni basar.
+
+    Resimler `images_buffer` (canlı) ve `msg["images"]` (geçmiş) üzerinden
+    ayrıca renderlanıyor — burada hem [GÖRSEL: ...] etiketlerini hem de
+    LLM'in zaman zaman ürettiği çıplak "Görsel: /path" satırlarını süpürüp
+    geriye yalın cevabı bırakıyoruz. Aksi halde resim bastırılmadığında
+    ekranda yetim bir dosya yolu kalıyor.
+    """
+    clean_text = _IMAGE_PATTERN.sub("", text)
+    clean_text = _BARE_IMAGE_LINE.sub("", clean_text).strip()
     if clean_text:
         st.markdown(clean_text)
-    
-    for match in _IMAGE_PATTERN.finditer(text):
-        img_path = match.group(1).strip()
-        blob = _cached_image_bytes(st.session_state.token, img_path)
-        if blob:
-            st.image(blob, use_container_width=True)
-        else:
-            st.error(f"Görsel API'den çekilemedi veya backend'de yok: {img_path}")
 
 def _render_messages() -> None:
     lang_tag = _tts_lang_code(st.session_state.get("voice_lang", "Türkçe"))
