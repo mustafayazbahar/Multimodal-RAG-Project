@@ -295,6 +295,7 @@ def _extract_pdf(
                         )
                     )
 
+                raster_count_this_page = 0
                 for img_index, img in enumerate(page.get_images(full=True)):
                     xref = img[0]
                     base_image = pdf.extract_image(xref)
@@ -312,6 +313,7 @@ def _extract_pdf(
                     image_path = _save_browser_safe_image(
                         image_bytes, image_stem, base_image["ext"]
                     )
+                    raster_count_this_page += 1
 
                     summary = _summarize_image(vlm_model, vlm_tokenizer, image_path)
                     docs.append(
@@ -326,6 +328,42 @@ def _extract_pdf(
                             },
                         )
                     )
+
+                # Vektör diyagram kurtarma: Kurose & Ross gibi kitaplarda
+                # diyagramların çoğu raster değil PDF çizgi/şekil primitif'i.
+                # get_images() bunları görmüyor. Sayfada yoğun çizim varsa
+                # ve raster resim çıkmadıysa sayfayı PNG'ye render edip
+                # tek bir "figür" olarak işliyoruz; VLM de tanımlasın diye.
+                if raster_count_this_page == 0:
+                    try:
+                        drawing_count = len(page.get_drawings())
+                    except Exception:  # noqa: BLE001
+                        drawing_count = 0
+                    if drawing_count >= settings.rag.page_render_drawing_threshold:
+                        dpi = settings.rag.page_render_dpi
+                        pix = page.get_pixmap(dpi=dpi)
+                        png_bytes = pix.tobytes("png")
+                        page_img_path = img_folder / f"page_{page_num + 1}_rendered.png"
+                        img_hash = hashlib.md5(png_bytes).hexdigest()
+                        if img_hash not in seen_image_hashes:
+                            seen_image_hashes.add(img_hash)
+                            page_img_path.write_bytes(png_bytes)
+                            summary = _summarize_image(
+                                vlm_model, vlm_tokenizer, page_img_path
+                            )
+                            docs.append(
+                                Document(
+                                    page_content=f"[IMAGE SUMMARY]: {summary}",
+                                    metadata={
+                                        "source": pdf_path.name,
+                                        "page": page_num,
+                                        "type": "image",
+                                        "image_path": str(page_img_path),
+                                        "fingerprint": fingerprint_hash,
+                                        "rendered_from_vectors": True,
+                                    },
+                                )
+                            )
     finally:
         if plumber_doc is not None:
             try:

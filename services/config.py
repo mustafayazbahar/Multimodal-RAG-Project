@@ -108,8 +108,18 @@ class RAGSettings:
     dense_weight: float = field(default_factory=lambda: _env_float("DENSE_WEIGHT", 0.6))
     sparse_weight: float = field(default_factory=lambda: _env_float("SPARSE_WEIGHT", 0.4))
     rrf_k: int = field(default_factory=lambda: _env_int("RRF_K", 60))
-    min_image_bytes: int = field(default_factory=lambda: _env_int("MIN_IMAGE_BYTES", 15000))
+    # 15 KB filtresi ders kitaplarındaki ufak diyagramları topluca eliyordu;
+    # 2 KB ile ikon/dekor süzülürken anlamlı diyagramlar yakalanıyor.
+    min_image_bytes: int = field(default_factory=lambda: _env_int("MIN_IMAGE_BYTES", 2000))
     min_text_chars: int = field(default_factory=lambda: _env_int("MIN_TEXT_CHARS", 15))
+    # Bir sayfada bu kadar vektör çizim primitif'i varsa ve sayfadan raster
+    # resim çıkmadıysa, sayfayı PNG olarak rasterize edip "figür" gibi
+    # işliyoruz — Kurose & Ross gibi kitaplardaki vektör diyagramları
+    # PyMuPDF'in get_images() yöntemi göremiyor.
+    page_render_drawing_threshold: int = field(
+        default_factory=lambda: _env_int("PAGE_RENDER_DRAWING_THRESHOLD", 20)
+    )
+    page_render_dpi: int = field(default_factory=lambda: _env_int("PAGE_RENDER_DPI", 150))
     temperature: float = field(default_factory=lambda: _env_float("TEMPERATURE", 0.3))
     history_window: int = field(default_factory=lambda: _env_int("HISTORY_WINDOW", 4))
     ocr_languages: tuple = ("tr", "en")
