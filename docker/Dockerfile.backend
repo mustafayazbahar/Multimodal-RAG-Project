@@ -1,4 +1,5 @@
 # DeepCampus backend (FastAPI + ingestion pipeline)
+# syntax=docker/dockerfile:1.4
 FROM python:3.12-slim
 
 RUN apt-get update && apt-get install -y \
@@ -10,8 +11,13 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
+# BuildKit cache mount: pip'in indirdiği wheel'leri build'ler arası kalıcı
+# tutuyor. İlk build yine ağır (~3.5 GB PyTorch + bağımlılıklar) ama sonraki
+# build'lerde aynı paket tekrar indirilmez — sadece değişen requirements
+# satırı için yeni indirme olur.
 COPY requirements.backend.txt .
-RUN pip install --no-cache-dir -r requirements.backend.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.backend.txt
 
 COPY services/ ./services/
 COPY backend/ ./backend/
