@@ -323,6 +323,35 @@ def _handle_register(
         st.error(str(exc))
 
 
+def _redirect_top_window(url: str) -> None:
+    """Navigate the browser's top window — escapes Streamlit's iframe.
+
+    `<meta http-equiv="refresh">` inside `st.markdown` only refreshes
+    Streamlit's inner iframe, not the parent page; a Keycloak login or
+    end-session URL has to land in the top window for the cookie flow
+    to take effect. We inject a tiny components iframe whose script
+    bumps `window.top.location.href` — same-origin (both iframes live
+    on the Streamlit host) so the navigation is allowed.
+    """
+    safe_url = json.dumps(url)
+    st.components.v1.html(
+        f"""
+        <script>
+            (function() {{
+                try {{
+                    window.top.location.href = {safe_url};
+                }} catch (e) {{
+                    // Fallback for any cross-origin edge case.
+                    window.location.href = {safe_url};
+                }}
+            }})();
+        </script>
+        """,
+        height=0,
+    )
+    st.stop()
+
+
 def _start_keycloak_login() -> None:
     """Redirect the browser to Keycloak's authorize page (OAuth Code flow)."""
     try:
@@ -330,13 +359,7 @@ def _start_keycloak_login() -> None:
     except api.ApiError as exc:
         st.error(f"Could not reach the backend: {exc}")
         return
-    # Use a top-window meta refresh so the redirect breaks out of any
-    # Streamlit iframe sandbox.
-    st.markdown(
-        f'<meta http-equiv="refresh" content="0; url={login_url}">',
-        unsafe_allow_html=True,
-    )
-    st.stop()
+    _redirect_top_window(login_url)
 
 
 def _post_auth_success(data: dict) -> None:
@@ -366,24 +389,44 @@ def _post_auth_success(data: dict) -> None:
 
 
 def _logout() -> None:
-    """Local logout + Keycloak end-session redirect (silent if id_token present)."""
+    """Local logout + Keycloak end-session redirect.
+
+    Order matters:
+    1. Clear localStorage so the next page load can't auto-restore.
+    2. Wipe auth-related session_state keys *selectively* — a wholesale
+       `st.session_state.clear()` also drops Streamlit-internal widget
+       state and the theme, which can leave the page in a half-broken
+       state for the brief instant before the redirect lands.
+    3. Sleep ~0.3 s so the localStorage iframe finishes its delete
+       postMessage before the navigation kicks in. Without this nudge,
+       Keycloak occasionally redirects us back to Streamlit so fast
+       that the cookie is still around and `hydrate_from_cookie()`
+       signs us right back in.
+    4. Force a top-window navigation to the Keycloak end-session URL
+       (see _redirect_top_window — meta-refresh inside Streamlit's
+       inner iframe doesn't escape to the parent).
+    """
     id_token = st.session_state.get("id_token")
     try:
         logout_url = api.get_logout_url(FRONTEND_URL, id_token)
     except api.ApiError:
+        # If we can't reach the backend, at least bounce the user back
+        # to the login screen locally.
         logout_url = FRONTEND_URL
 
     ses.clear_cookie()
-    st.session_state.clear()
+
+    for k in (
+        "token", "id_token", "username", "role", "messages",
+        "active_session_id", "sessions", "editing_session_id",
+        "models_initialized", "available_models", "pullable_models",
+        "selected_model",
+    ):
+        st.session_state.pop(k, None)
     st.query_params.clear()
 
-    # Top-window redirect breaks out of any iframe; without it Streamlit
-    # would keep the Keycloak logout page sandboxed.
-    st.markdown(
-        f'<meta http-equiv="refresh" content="0; url={logout_url}">',
-        unsafe_allow_html=True,
-    )
-    st.stop()
+    time.sleep(0.3)
+    _redirect_top_window(logout_url)
 
 
 # ────────────────────────────────────────────────────────────────────────────
