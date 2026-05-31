@@ -74,15 +74,15 @@ _BARE_IMAGE_LINE = re.compile(
     r"(?im)^\s*(?:görsel|gorsel|image|resim|resi̇m|figür|figure|sayfa|page)\s*[:\-]\s*\S+.*$"
 )
 
-# Voice dil eşlemeleri.
+# Voice language mappings.
 def _stt_lang_code(label: str) -> str:
-    return "tr" if label == "Türkçe" else "en"
+    return "tr" if label == "Turkish" else "en"
 
 def _tts_lang_code(label: str) -> str:
-    return "tr-TR" if label == "Türkçe" else "en-US"
+    return "tr-TR" if label == "Turkish" else "en-US"
 
 def _speak_button(text: str, lang_tag: str, key: str) -> None:
-    """Cevabın yanına 'Sesli oku' butonu basar — tarayıcı TTS'i çağırır."""
+    """Render a 'Read aloud' button next to an answer — invokes browser TTS."""
     if not text:
         return
     safe_text = json.dumps(text)
@@ -94,7 +94,7 @@ def _speak_button(text: str, lang_tag: str, key: str) -> None:
                 style="background:transparent;border:1px solid #6b7280;
                        color:#d4d4d8;padding:4px 10px;border-radius:6px;
                        cursor:pointer;font-size:12px;margin-top:6px;">
-            🔊 Sesli oku
+            🔊 Read aloud
         </button>
         <script>
         (function() {{
@@ -156,7 +156,7 @@ def _render_content_with_images(text: str) -> None:
         st.markdown(clean_text)
 
 def _render_messages() -> None:
-    lang_tag = _tts_lang_code(st.session_state.get("voice_lang", "Türkçe"))
+    lang_tag = _tts_lang_code(st.session_state.get("voice_lang", "Turkish"))
     for idx, msg in enumerate(st.session_state.messages):
         role = msg["role"]
         avatar = "🧑‍🎓" if role == "user" else "🎓"
@@ -196,7 +196,7 @@ for k, v in {
     "available_models": [],
     "last_query_at": None,
     "pending_query": None,
-    "voice_lang": "Türkçe",
+    "voice_lang": "Turkish",
 }.items():
     st.session_state.setdefault(k, v)
 
@@ -351,19 +351,19 @@ if not _logged_in():
 # Sidebar
 # ────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
-    # Tema toggle — en üstte, küçük ve dikkat dağıtmadan. Butona basınca
-    # session_state'teki "theme" anahtarı dönüyor, rerun ile inject_styles
-    # yeni varyantı basıyor.
+    # Theme toggle — top of the sidebar, small and unobtrusive. Clicking it
+    # flips the "theme" key in session_state; the rerun re-injects the CSS
+    # with the new variant.
     theme_label = (
-        "☀️ Açık tema" if st.session_state.get("theme", "dark") == "dark"
-        else "🌙 Koyu tema"
+        "☀️ Light theme" if st.session_state.get("theme", "dark") == "dark"
+        else "🌙 Dark theme"
     )
     st.button(
         theme_label,
         key="theme_toggle",
         on_click=_toggle_theme,
         use_container_width=True,
-        help="Açık ve koyu tema arasında geçiş yap.",
+        help="Switch between light and dark theme.",
     )
 
     st.markdown("### DeepCampus")
@@ -388,12 +388,12 @@ with st.sidebar:
     st.divider()
     sidebar_section_title("Voice")
     st.session_state.voice_lang = st.radio(
-        "Konuşma dili",
-        options=["Türkçe", "English"],
-        index=0 if st.session_state.get("voice_lang", "Türkçe") == "Türkçe" else 1,
+        "Voice language",
+        options=["Turkish", "English"],
+        index=0 if st.session_state.get("voice_lang", "Turkish") == "Turkish" else 1,
         horizontal=True,
         key="voice_lang_radio",
-        help="Mikrofonla sorma ve cevabı sesli okumada kullanılacak dil.",
+        help="Language used for voice input and read-aloud.",
     )
 
     st.divider()
@@ -482,9 +482,9 @@ with st.sidebar:
                 summaries = []
                 st.warning(str(exc))
             if not summaries:
-                st.caption("Henüz ingest çalışmadı veya hiçbir görsel çıkarılmadı.")
+                st.caption("No ingestion has run yet, or no images were extracted.")
             else:
-                st.caption(f"{len(summaries)} görsel · `data/image_summaries.json` dosyasında")
+                st.caption(f"{len(summaries)} images · stored in `data/image_summaries.json`")
                 for item in summaries:
                     page = (item.get("page") or 0) + 1
                     st.markdown(
@@ -552,7 +552,7 @@ with st.sidebar:
     st.caption("DeepCampus v2 · BGE-M3 hybrid + Qdrant · Local Ollama LLMs")
 
 # ────────────────────────────────────────────────────────────────────────────
-# Ana Ekran
+# Main screen
 # ────────────────────────────────────────────────────────────────────────────
 SUGGESTIONS = [
     "Summarize the main contributions of the indexed papers.",
@@ -573,15 +573,15 @@ else:
     )
     _render_messages()
 
-# Mikrofon
+# Microphone
 if _STT_AVAILABLE:
     voice_col, _spacer = st.columns([1, 4])
     with voice_col:
-        stt_lang = _stt_lang_code(st.session_state.get("voice_lang", "Türkçe"))
+        stt_lang = _stt_lang_code(st.session_state.get("voice_lang", "Turkish"))
         spoken = speech_to_text(
             language=stt_lang,
-            start_prompt="🎤 Konuş",
-            stop_prompt="⏹️ Durdur",
+            start_prompt="🎤 Speak",
+            stop_prompt="⏹️ Stop",
             just_once=True,
             use_container_width=True,
             key="stt_widget",
@@ -589,7 +589,7 @@ if _STT_AVAILABLE:
         if spoken:
             st.session_state.pending_query = spoken
 
-# Mesaj Gönderme
+# Message submission
 typed = st.chat_input("Ask a question about the documents...")
 user_query = st.session_state.pending_query or typed
 st.session_state.pending_query = None
@@ -666,7 +666,7 @@ if user_query:
 
             _speak_button(
                 final_answer,
-                _tts_lang_code(st.session_state.get("voice_lang", "Türkçe")),
+                _tts_lang_code(st.session_state.get("voice_lang", "Turkish")),
                 key="live-answer",
             )
 

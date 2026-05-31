@@ -1,15 +1,21 @@
-streamlit>=1.36,<2.0
+# Pinned below 1.57: st.components.v1.html was deprecated in Streamlit 1.56
+# and is scheduled for removal in a release after 2026-06-01. The app still
+# relies on st.components.v1.html for the TTS button, auto-scroll, chat-input
+# autofocus, and the login-Enter binding (frontend/app.py + styles.py). Capping
+# at <1.57 keeps us on the 1.56.x line that still ships the function. TODO:
+# migrate those call sites to st.html() and lift this cap.
+streamlit>=1.36,<1.57
 requests>=2.31,<3.0
 python-dotenv>=1.0,<2.0
-# extra-streamlit-components: artık session.py'de kullanılmıyor (cookie
-# iframe Chrome'da kararsızdı). Bağımlı başka modül kalırsa diye pin
-# tutuluyor — gereksiz olduğu kanıtlandığında kaldırılabilir.
+# extra-streamlit-components: no longer used in session.py (the cookie iframe
+# was unstable in Chrome). Kept pinned in case another module depends on it;
+# can be dropped once proven unnecessary.
 extra-streamlit-components>=0.1.71,<1.0
-# Tarayıcı localStorage'ında F5'e dayanıklı session persistence için —
-# JWT'yi URL'e (Referer/log sızıntısı) ya da iframe cookie'sine (Chrome
-# 3rd-party block riski) bağlamadan tarayıcıda tutar.
+# Browser localStorage-backed, F5-proof session persistence — keeps the JWT in
+# the browser without putting it in the URL (Referer/log leakage) or in an
+# iframe cookie (Chrome third-party blocking risk).
 streamlit-local-storage>=0.0.20,<1.0
-# Tarayıcı tabanlı speech-to-text (Web Speech API wrapper) — chat'teki
-# mikrofon butonu için. Ses kullanıcının cihazından çıkmıyor, backend'e
-# whisper round-trip gerekmiyor. TR + EN built-in.
+# Browser-based speech-to-text (Web Speech API wrapper) for the chat mic
+# button. Audio never leaves the user's device, no whisper round-trip to the
+# backend. TR + EN built in.
 streamlit-mic-recorder>=0.0.8,<1.0
