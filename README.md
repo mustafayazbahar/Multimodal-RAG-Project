@@ -14,6 +14,8 @@
 
 > **DeepCampus** is a **local-first, privacy-preserving** Multimodal RAG system designed for academic research. It reads, understands, and answers questions about complex PDF documents — including charts, tables, and scanned pages — entirely on your own hardware. No cloud, no API keys, no data leakage.
 
+> **v2.5 update** — **Multi-session "Topics"** (per-user named chat threads, rename / delete, a sticky General Chat) plus the **OAuth Authorization Code flow** as the default login path (the user's password is entered on Keycloak's own login page — it never flows through Streamlit). The legacy password-grant form is preserved under an "Other sign-in options" expander for API and headless use. `chat_history` gets a `session_id` column and orphan rows from the pre-Topics schema are auto-migrated into each user's General Chat on first boot. localStorage now remembers the active topic so F5 lands you on the same thread. New env vars: `KEYCLOAK_PUBLIC_URL` (browser-facing Keycloak host) and `FRONTEND_URL` (OAuth redirect_uri).
+
 > **v2.4 update** — **Docling** (IBM) layered into PDF ingestion: layout-aware text + TableFormer-based table extraction + figure cropping, PyMuPDF+EasyOCR kept as automatic fallback. UI is now English-only with a one-click **light / dark theme toggle** at the top of the sidebar; chat-rendered images are capped at 420 px wide; streamed answers are scrubbed of leftover `[GÖRSEL: …]` / `[Figure …]` citation tags. Streamlit is pinned `<1.57` until the four `st.components.v1.html` call sites migrate to `st.html` (deprecated for removal after 2026-06-01). Qdrant upserts are batched (64 points / 120 s client timeout) so large textbooks finish without `ResponseHandlingException: timed out`.
 
 > **v2.3 update** — **Keycloak** identity provider replaces the legacy SQLite+bcrypt auth; OAuth2 password-grant flow, realm bootstrap on first start, role assignment via Admin API, Moondream image captions persisted to a human-readable JSON file.
@@ -35,7 +37,8 @@
 | 📑 **Smart PDF Dedup** | File hash + content fingerprint | Catches same paper saved under a different filename or re-stamped headers, without false positives on shared titles |
 | 📄 **Layout-aware PDF parsing** | **Docling** (TableFormer) + PyMuPDF + EasyOCR fallback | Docling handles reading order, OCR on scans, table-structure recognition, and figure cropping; PyMuPDF+EasyOCR kicks in if Docling can't open a PDF |
 | 🎙️ **Voice I/O** | Browser Web Speech API | Mic-to-text **and** "Sesli oku" TTS in TR or EN — audio never leaves the device |
-| 🔐 **Keycloak Auth (OIDC)** | Keycloak realm + password grant | Instructor / Student roles, Admin API user creation, RS256-signed JWTs verified against the realm JWKS |
+| 🔐 **Keycloak Auth (OIDC)** | OAuth Code flow (default) + password grant (API) | Instructor / Student roles, Admin API user creation, RS256 JWTs verified against the realm JWKS; password never touches Streamlit on the Code-flow path |
+| 💬 **Multi-session "Topics"** | SQLite `chat_sessions` + sidebar UI | Per-user named chat threads; rename / delete with a sticky **General Chat** that can't be removed |
 | 💾 **Refresh-proof Login** | Browser localStorage | F5 keeps you signed in; no JWT in the URL, no third-party cookie blocking |
 | 🧹 **Reset Knowledge Base** | One-click sidebar action | Drops the Qdrant collection + state file so the next ingest is fresh |
 | 🎨 **Modern UI** | Amber accent, **explicit light/dark toggle** | English-only labels, avatar chat bubbles, source cards, welcome screen, sliders w/ tooltips, chat images capped at 420 px |

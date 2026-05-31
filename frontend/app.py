@@ -45,41 +45,39 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# Çevre değişkenleri ve stil enjeksiyonu. Tema seçimi session_state'ten
-# okunuyor; toggle butonuna basıldığında rerun ile yeni CSS basılıyor.
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 if "theme" not in st.session_state:
     st.session_state["theme"] = "dark"
 inject_styles(st.session_state["theme"])
 
+# Browser-facing Streamlit URL — embedded in the OAuth redirect_uri so
+# Keycloak knows where to send the user back. Must match a redirect
+# URI the realm accepts (dev realm uses ["*"]).
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:8501").rstrip("/")
+
 # --- 5. GLOBAL DEĞİŞKENLER VE SABİTLER ---
-# Backend, LLM'e cevap sonunda [GÖRSEL: filepath] formatında alıntı yapmasını
-# söylüyor ve final_answer'a kaydetmeden önce bu etiketleri kırpıyor. Ama:
-#   (a) canlı streaming sırasında tokenlar ham geliyor, frontend de
-#       süpürmezse ekranda etiket yazısı kalıyor;
-#   (b) LLM zaman zaman talimatın dışına çıkıp "[IMAGE - Page 43]",
-#       "[USE CASE DİYAGRAMI: IMAGE - Page 12]", "[Figure 3]" gibi
-#       uydurma formatlar üretiyor.
-# Bu yüzden köşeli parantez içinde GÖRSEL/IMAGE/RESIM/FIGÜR/FIGURE/PAGE/SAYFA
-# geçen *her* alıntıyı süpürüyoruz — resimler zaten ayrı bir kanaldan
-# (images_buffer / msg.images) basılıyor, metinde yetim yol bırakmayalım.
+# Backend already strips [GÖRSEL: ...] from the saved final_answer, but
+# (a) live streamed tokens arrive raw and (b) the LLM occasionally
+# improvises formats like "[IMAGE - Page 43]" / "[Figure 3]" outside
+# the spec. We aggressively scrub anything that smells like an image
+# citation; the actual image rendering happens via a separate channel
+# (images_buffer / msg.images) so the text never needs the citation.
 _IMAGE_PATTERN = re.compile(
     r"\[[^\]\n]*?(?:GÖRSEL|GORSEL|IMAGE|RESIM|RESİM|FIGÜR|FIGURE|SAYFA|PAGE)\b[^\]\n]*?\]",
     re.IGNORECASE,
 )
-# LLM nadiren etiketi köşeli parantezsiz "Görsel: /path/..." veya
-# "Image: docs_images/foo.png" satırı olarak da üretiyor; bunları da
-# tamamen siliyoruz.
 _BARE_IMAGE_LINE = re.compile(
     r"(?im)^\s*(?:görsel|gorsel|image|resim|resi̇m|figür|figure|sayfa|page)\s*[:\-]\s*\S+.*$"
 )
 
-# Voice language mappings.
+
 def _stt_lang_code(label: str) -> str:
     return "tr" if label == "Turkish" else "en"
 
+
 def _tts_lang_code(label: str) -> str:
     return "tr-TR" if label == "Turkish" else "en-US"
+
 
 def _speak_button(text: str, lang_tag: str, key: str) -> None:
     """Render a 'Read aloud' button next to an answer — invokes browser TTS."""
@@ -118,15 +116,10 @@ def _speak_button(text: str, lang_tag: str, key: str) -> None:
     )
 
 # --- 6. YARDIMCI FONKSİYONLAR ---
-# Chat içinde gösterilen resimlerin maksimum genişliği (px). Eskiden
-# use_container_width=True ile basılıyordu, bu da resimleri sohbet
-# baloncuğu kadar büyütüp ekranı boğuyordu. CSS de aynı tavanı uyguluyor
-# — buradaki parametre Streamlit'in piksel cinsinden render boyutu.
 _IMAGE_MAX_WIDTH = 420
 
 
 def _render_image_blob(blob: bytes) -> None:
-    """Resmi makul bir boyutta basar; ekranı kaplamasını engeller."""
     st.image(blob, width=_IMAGE_MAX_WIDTH)
 
 
@@ -136,24 +129,17 @@ def _cached_image_bytes(token: str, img_path: str) -> bytes | None:
 
 
 def _toggle_theme() -> None:
-    """Aktif temayı dark <-> light arasında çevirir."""
     st.session_state["theme"] = (
         "light" if st.session_state.get("theme", "dark") == "dark" else "dark"
     )
 
-def _render_content_with_images(text: str) -> None:
-    """LLM'den gelen ham metni sanitize eder; resimleri DEĞİL, sadece metni basar.
 
-    Resimler `images_buffer` (canlı) ve `msg["images"]` (geçmiş) üzerinden
-    ayrıca renderlanıyor — burada hem [GÖRSEL: ...] etiketlerini hem de
-    LLM'in zaman zaman ürettiği çıplak "Görsel: /path" satırlarını süpürüp
-    geriye yalın cevabı bırakıyoruz. Aksi halde resim bastırılmadığında
-    ekranda yetim bir dosya yolu kalıyor.
-    """
+def _render_content_with_images(text: str) -> None:
     clean_text = _IMAGE_PATTERN.sub("", text)
     clean_text = _BARE_IMAGE_LINE.sub("", clean_text).strip()
     if clean_text:
         st.markdown(clean_text)
+
 
 def _render_messages() -> None:
     lang_tag = _tts_lang_code(st.session_state.get("voice_lang", "Turkish"))
@@ -178,11 +164,13 @@ def _render_messages() -> None:
                         source_cards(msg["sources"])
                 _speak_button(content, lang_tag, key=f"hist-{idx}")
 
+
 # ────────────────────────────────────────────────────────────────────────────
-# Session state defaults & F5 HYDRATION (Kritik Bölge)
+# Session state defaults & F5 HYDRATION
 # ────────────────────────────────────────────────────────────────────────────
 for k, v in {
     "token": None,
+    "id_token": None,
     "username": None,
     "role": None,
     "messages": [],
@@ -197,22 +185,58 @@ for k, v in {
     "last_query_at": None,
     "pending_query": None,
     "voice_lang": "Turkish",
+    "active_session_id": None,
+    "sessions": [],
+    "editing_session_id": None,
 }.items():
     st.session_state.setdefault(k, v)
 
-# F5 koruması: localStorage'a yazılmış {token, username, role} blob'unu
-# tarayıcıdan geri okur. URL'de hiçbir kimlik bilgisi tutulmuyor — eski
-# query-params yaklaşımı JWT'yi access log + Referer header + tarayıcı
-# geçmişine sızdırıyordu.
 ses.hydrate_from_cookie()
 
-# Eski URL fallback'inden artakalmış paramları temizle. Bir önceki sürümde
-# login token=eyJ... şeklinde URL'e yazılıyordu; kullanıcı pull edip
-# ilk girişini yapana kadar adres çubuğu kirli kalmasın diye yutuyoruz.
+
+# ────────────────────────────────────────────────────────────────────────────
+# OAuth Authorization Code callback — runs before any auth check.
+# ────────────────────────────────────────────────────────────────────────────
+def _handle_oauth_callback() -> None:
+    """If the URL carries `?code=...`, trade it for a token and sign in.
+
+    Only fires when no token is already loaded — otherwise a stale code
+    in the URL (e.g. from a back-button) could overwrite a fresh
+    session. The query param is cleared either way so the URL stays
+    clean.
+    """
+    if st.session_state.get("token"):
+        # Clear any leftover code param so it can't be replayed.
+        if "code" in st.query_params:
+            del st.query_params["code"]
+        return
+
+    code = st.query_params.get("code")
+    if not code:
+        return
+
+    del st.query_params["code"]
+    if "state" in st.query_params:
+        del st.query_params["state"]
+    if "session_state" in st.query_params:
+        del st.query_params["session_state"]
+
+    with st.spinner("Completing Keycloak sign-in..."):
+        try:
+            data = api.exchange_code(code, FRONTEND_URL)
+        except api.ApiError as exc:
+            st.error(f"Keycloak sign-in failed: {exc}")
+            return
+    _post_auth_success(data)
+
+
+# Eski URL fallback'inden artakalmış paramları temizle (token/user/role
+# eskiden URL'e yazılıyordu; artık localStorage kullanıyoruz).
 if any(k in st.query_params for k in ("token", "user", "role")):
     for k in ("token", "user", "role"):
         if k in st.query_params:
             del st.query_params[k]
+
 
 # ────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -220,11 +244,45 @@ if any(k in st.query_params for k in ("token", "user", "role")):
 def _logged_in() -> bool:
     return bool(st.session_state.token)
 
-def _refresh_models_and_history() -> None:
+
+def _refresh_sessions() -> None:
+    """Pull the user's session list; sync active_session_id if it's gone stale."""
     try:
-        st.session_state.messages = api.get_history(st.session_state.token)
+        sessions = api.list_sessions(st.session_state.token)
     except api.ApiError:
-        st.session_state.messages = []
+        sessions = []
+    st.session_state.sessions = sessions
+
+    valid_ids = {s["session_id"] for s in sessions}
+    if st.session_state.active_session_id not in valid_ids:
+        # Fall back to General Chat (always first per backend ordering).
+        default_session = next((s for s in sessions if s.get("is_default")), None)
+        st.session_state.active_session_id = (
+            default_session["session_id"] if default_session else None
+        )
+        ses.update_active_session(st.session_state.active_session_id)
+
+
+def _refresh_history() -> None:
+    """Load the active session's messages into st.session_state.messages."""
+    if not st.session_state.token:
+        return
+    try:
+        messages, resolved = api.get_history(
+            st.session_state.token,
+            st.session_state.active_session_id,
+        )
+    except api.ApiError:
+        messages, resolved = [], st.session_state.active_session_id
+    st.session_state.messages = messages
+    # Backend may have resolved a stale session_id back to General Chat;
+    # mirror that so the UI doesn't keep pointing at a missing thread.
+    if resolved and resolved != st.session_state.active_session_id:
+        st.session_state.active_session_id = resolved
+        ses.update_active_session(resolved)
+
+
+def _refresh_models() -> None:
     try:
         info = api.list_models(st.session_state.token)
         st.session_state.available_models = info.get("available", [])
@@ -233,6 +291,14 @@ def _refresh_models_and_history() -> None:
             st.session_state.selected_model = info.get("default")
     except api.ApiError:
         pass
+
+
+def _switch_session(session_id: str) -> None:
+    """Make `session_id` the active topic; reload its history."""
+    st.session_state.active_session_id = session_id
+    ses.update_active_session(session_id)
+    _refresh_history()
+
 
 def _handle_login(username: str, password: str) -> None:
     """Password-grant login via the backend's Keycloak proxy."""
@@ -250,7 +316,6 @@ def _handle_register(
     first_name: str,
     last_name: str,
 ) -> None:
-    """Create a Keycloak user and auto-login on success."""
     try:
         data = api.register(username, password, email, first_name, last_name)
         _post_auth_success(data)
@@ -258,38 +323,74 @@ def _handle_register(
         st.error(str(exc))
 
 
+def _start_keycloak_login() -> None:
+    """Redirect the browser to Keycloak's authorize page (OAuth Code flow)."""
+    try:
+        login_url = api.get_login_url(FRONTEND_URL)
+    except api.ApiError as exc:
+        st.error(f"Could not reach the backend: {exc}")
+        return
+    # Use a top-window meta refresh so the redirect breaks out of any
+    # Streamlit iframe sandbox.
+    st.markdown(
+        f'<meta http-equiv="refresh" content="0; url={login_url}">',
+        unsafe_allow_html=True,
+    )
+    st.stop()
+
+
 def _post_auth_success(data: dict) -> None:
-    # 1. RAM'e kaydet
     st.session_state.token = data["access_token"]
     st.session_state.role = data["role"]
     st.session_state.username = data["username"]
+    st.session_state.id_token = data.get("id_token")
 
-    # 2. Tarayıcı localStorage'ına kaydet — F5'te tekrar girmek yerine
-    #    session restore edilecek. URL'e hiçbir şey yazmıyoruz.
-    ses.save_cookie(data["access_token"], data["username"], data["role"])
+    # Hydrate sessions + history immediately so the post-rerun render
+    # already shows the right thread.
+    _refresh_sessions()
+    _refresh_history()
+    _refresh_models()
 
-    _refresh_models_and_history()
-    # localStorage iframe async; rerun'dan önce kısa bir yield bırakıyoruz
-    # ki postMessage tarayıcıya ulaşsın ve F5'te bulunabilsin.
+    ses.save_cookie(
+        token=data["access_token"],
+        username=data["username"],
+        role=data["role"],
+        id_token=data.get("id_token"),
+        active_session_id=st.session_state.active_session_id,
+    )
+
+    # Give the localStorage iframe a moment to flush before rerun, so
+    # an immediate F5 finds the freshly-written blob.
     time.sleep(0.4)
     st.rerun()
 
+
 def _logout() -> None:
-    # 1. localStorage'tan token blob'unu sil — yoksa F5 tekrar oturum
-    #    açacak.
+    """Local logout + Keycloak end-session redirect (silent if id_token present)."""
+    id_token = st.session_state.get("id_token")
+    try:
+        logout_url = api.get_logout_url(FRONTEND_URL, id_token)
+    except api.ApiError:
+        logout_url = FRONTEND_URL
+
     ses.clear_cookie()
-
-    # 2. RAM'i temizle
-    for key in ("token", "username", "role", "messages", "available_models", "selected_model"):
-        st.session_state[key] = [] if key in ("messages", "available_models") else None
-
-    # 3. Eski URL fallback'inden artakalmış paramları da süpür.
+    st.session_state.clear()
     st.query_params.clear()
-    st.rerun()
+
+    # Top-window redirect breaks out of any iframe; without it Streamlit
+    # would keep the Keycloak logout page sandboxed.
+    st.markdown(
+        f'<meta http-equiv="refresh" content="0; url={logout_url}">',
+        unsafe_allow_html=True,
+    )
+    st.stop()
+
 
 # ────────────────────────────────────────────────────────────────────────────
-# Auth screen
+# Auth screen (login / register)
 # ────────────────────────────────────────────────────────────────────────────
+_handle_oauth_callback()
+
 if not _logged_in():
     left, mid, right = st.columns([1, 2, 1])
     with mid:
@@ -299,61 +400,127 @@ if not _logged_in():
             "Sign in via Keycloak to start asking questions.",
         )
 
-        # st.form inside st.tabs would swallow Enter on Streamlit 1.57,
-        # so the mode toggle is a radio at the top level instead.
-        mode = st.radio(
-            "Mode",
-            options=["Sign in", "Create account"],
-            horizontal=True,
-            label_visibility="collapsed",
-            key="auth_mode",
+        # Primary path is browser-redirected OAuth Code flow (password
+        # never touches Streamlit). The form-based password-grant path
+        # is kept under a fallback expander for headless / API-style
+        # access and for environments where the Keycloak host isn't
+        # browser-reachable.
+        st.button(
+            "🔐 Sign in with Keycloak",
+            type="primary",
+            use_container_width=True,
+            on_click=_start_keycloak_login,
+            help="Opens the Keycloak login page in this tab.",
+        )
+        st.caption(
+            "Recommended. Your password is entered on Keycloak's own login "
+            "page — it never flows through DeepCampus."
         )
 
-        if mode == "Sign in":
-            with st.form("login_form", clear_on_submit=False):
-                u = st.text_input("Username", key="login_user")
-                p = st.text_input("Password", type="password", key="login_pw")
-                if st.form_submit_button(
-                    "Sign in", type="primary", use_container_width=True
-                ):
-                    _handle_login(u, p)
-            st.caption(
-                "Default admin in the seeded realm: `admin / admin123` — "
-                "change it from the Keycloak admin console for production."
+        with st.expander("Other sign-in options", expanded=False):
+            mode = st.radio(
+                "Mode",
+                options=["Email / password", "Create account"],
+                horizontal=True,
+                label_visibility="collapsed",
+                key="auth_mode",
             )
-        else:
-            with st.form("register_form", clear_on_submit=False):
-                ru = st.text_input("Username *", key="reg_user")
-                rmail = st.text_input("Email *", key="reg_email")
-                cols = st.columns(2)
-                rfirst = cols[0].text_input("First name (optional)", key="reg_first")
-                rlast = cols[1].text_input("Last name (optional)", key="reg_last")
-                rp = st.text_input("Password *", type="password", key="reg_pw")
-                rp2 = st.text_input(
-                    "Password (confirm) *", type="password", key="reg_pw2"
+
+            if mode == "Email / password":
+                with st.form("login_form", clear_on_submit=False):
+                    u = st.text_input("Username", key="login_user")
+                    p = st.text_input("Password", type="password", key="login_pw")
+                    if st.form_submit_button(
+                        "Sign in", type="primary", use_container_width=True
+                    ):
+                        _handle_login(u, p)
+                st.caption(
+                    "Default admin in the seeded realm: `admin / admin123` — "
+                    "change it from the Keycloak admin console for production."
                 )
-                if st.form_submit_button(
-                    "Create account", type="primary", use_container_width=True
-                ):
-                    if not ru or not rmail or not rp:
-                        st.error("Username, email and password are required.")
-                    elif rp != rp2:
-                        st.error("Passwords do not match.")
-                    else:
-                        _handle_register(ru, rp, rmail, rfirst, rlast)
+            else:
+                with st.form("register_form", clear_on_submit=False):
+                    ru = st.text_input("Username *", key="reg_user")
+                    rmail = st.text_input("Email *", key="reg_email")
+                    cols = st.columns(2)
+                    rfirst = cols[0].text_input("First name (optional)", key="reg_first")
+                    rlast = cols[1].text_input("Last name (optional)", key="reg_last")
+                    rp = st.text_input("Password *", type="password", key="reg_pw")
+                    rp2 = st.text_input(
+                        "Password (confirm) *", type="password", key="reg_pw2"
+                    )
+                    if st.form_submit_button(
+                        "Create account", type="primary", use_container_width=True
+                    ):
+                        if not ru or not rmail or not rp:
+                            st.error("Username, email and password are required.")
+                        elif rp != rp2:
+                            st.error("Passwords do not match.")
+                        else:
+                            _handle_register(ru, rp, rmail, rfirst, rlast)
 
         bind_login_enter()
 
     if not _logged_in():
         st.stop()
 
+
+# ────────────────────────────────────────────────────────────────────────────
+# Post-login bootstrap: sessions, history and models
+# ────────────────────────────────────────────────────────────────────────────
+if not st.session_state.get("models_initialized"):
+    _refresh_sessions()
+    _refresh_history()
+    _refresh_models()
+    st.session_state["models_initialized"] = True
+
+
 # ────────────────────────────────────────────────────────────────────────────
 # Sidebar
 # ────────────────────────────────────────────────────────────────────────────
+def _handle_create_topic() -> None:
+    title = (st.session_state.get("new_topic_title") or "").strip()
+    if not title:
+        st.toast("Topic name is required.", icon="⚠️")
+        return
+    try:
+        created = api.create_session(st.session_state.token, title)
+    except api.ApiError as exc:
+        st.error(str(exc))
+        return
+    st.session_state["new_topic_title"] = ""
+    _refresh_sessions()
+    _switch_session(created["session_id"])
+
+
+def _handle_rename_topic(session_id: str) -> None:
+    new_title = (st.session_state.get(f"edit_input_{session_id}") or "").strip()
+    if not new_title:
+        st.toast("New title required.", icon="⚠️")
+        return
+    try:
+        api.rename_session(st.session_state.token, session_id, new_title)
+    except api.ApiError as exc:
+        st.error(str(exc))
+        return
+    st.session_state.editing_session_id = None
+    _refresh_sessions()
+
+
+def _handle_delete_topic(session_id: str) -> None:
+    try:
+        api.delete_session(st.session_state.token, session_id)
+    except api.ApiError as exc:
+        st.error(str(exc))
+        return
+    if st.session_state.active_session_id == session_id:
+        st.session_state.active_session_id = None
+    _refresh_sessions()
+    _refresh_history()
+
+
 with st.sidebar:
-    # Theme toggle — top of the sidebar, small and unobtrusive. Clicking it
-    # flips the "theme" key in session_state; the rerun re-injects the CSS
-    # with the new variant.
+    # Theme toggle — top of the sidebar, small and unobtrusive.
     theme_label = (
         "☀️ Light theme" if st.session_state.get("theme", "dark") == "dark"
         else "🌙 Dark theme"
@@ -372,18 +539,91 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
 
-    col_a, col_b = st.columns(2)
-    with col_a:
-        if st.button("Logout", use_container_width=True):
-            _logout()
-    with col_b:
-        if st.button("Clear chat", use_container_width=True):
-            try:
-                api.clear_history(st.session_state.token)
-                st.session_state.messages = []
+    if st.button("Logout", use_container_width=True):
+        _logout()
+
+    st.divider()
+    sidebar_section_title("📚 My Topics")
+
+    with st.expander("➕ Create new topic", expanded=False):
+        st.text_input(
+            "Topic name",
+            key="new_topic_title",
+            placeholder="e.g. Computer Networks – Chapter 4",
+        )
+        st.button(
+            "Create",
+            type="primary",
+            on_click=_handle_create_topic,
+            use_container_width=True,
+            key="create_topic_btn",
+        )
+
+    sessions = st.session_state.sessions or []
+    for session in sessions:
+        sid = session["session_id"]
+        is_active = (sid == st.session_state.active_session_id)
+        is_default = session.get("is_default", False)
+        icon = "🟢" if is_active else "💬"
+
+        # Inline rename mode (only for non-default topics).
+        if st.session_state.editing_session_id == sid:
+            col1, col2, col3 = st.columns([5, 1, 1])
+            with col1:
+                st.text_input(
+                    "Rename",
+                    value=session["title"],
+                    key=f"edit_input_{sid}",
+                    label_visibility="collapsed",
+                )
+            with col2:
+                if st.button("✅", key=f"save_{sid}", help="Save"):
+                    _handle_rename_topic(sid)
+                    st.rerun()
+            with col3:
+                if st.button("❌", key=f"cancel_{sid}", help="Cancel"):
+                    st.session_state.editing_session_id = None
+                    st.rerun()
+            continue
+
+        if is_default:
+            # General Chat — no rename / delete buttons.
+            if st.button(
+                f"{icon} {session['title']}",
+                key=f"sel_{sid}",
+                type="primary" if is_active else "secondary",
+                use_container_width=True,
+            ):
+                _switch_session(sid)
                 st.rerun()
-            except api.ApiError as exc:
-                st.error(str(exc))
+        else:
+            col1, col2, col3 = st.columns([5, 1, 1])
+            with col1:
+                if st.button(
+                    f"{icon} {session['title']}",
+                    key=f"sel_{sid}",
+                    type="primary" if is_active else "secondary",
+                    use_container_width=True,
+                ):
+                    _switch_session(sid)
+                    st.rerun()
+            with col2:
+                if st.button("✏️", key=f"edit_{sid}", help="Rename"):
+                    st.session_state.editing_session_id = sid
+                    st.rerun()
+            with col3:
+                if st.button("🗑️", key=f"del_{sid}", help="Delete"):
+                    _handle_delete_topic(sid)
+                    st.rerun()
+
+    st.divider()
+    if st.button("Clear current topic", use_container_width=True, key="clear_chat_btn"):
+        try:
+            api.clear_history(st.session_state.token, st.session_state.active_session_id)
+            st.session_state.messages = []
+            st.rerun()
+        except api.ApiError as exc:
+            st.error(str(exc))
 
     st.divider()
     sidebar_section_title("Voice")
@@ -398,16 +638,12 @@ with st.sidebar:
 
     st.divider()
     sidebar_section_title("Model")
-    if not st.session_state.get("models_initialized"):
-        _refresh_models_and_history()
-        st.session_state["models_initialized"] = True
-
     pulled = st.session_state.available_models or []
     pullable = st.session_state.get("pullable_models") or []
 
     if not pulled and not pullable:
         if st.button("Refresh model list", key="refresh_models", use_container_width=True):
-            _refresh_models_and_history()
+            _refresh_models()
             st.rerun()
 
     if pulled:
@@ -444,7 +680,7 @@ with st.sidebar:
                             break
                     else:
                         status.update(label=f"Downloaded {to_pull}", state="complete", expanded=False)
-                        _refresh_models_and_history()
+                        _refresh_models()
                         st.rerun()
                 except api.ApiError as exc:
                     status.update(label=f"Failed: {exc}", state="error")
@@ -472,9 +708,6 @@ with st.sidebar:
         except api.ApiError as exc:
             st.warning(str(exc))
 
-        # Moondream-generated image captions, persisted by ingestion.
-        # Lets the instructor verify the VLM's understanding of each
-        # figure before relying on the chat citations.
         with st.expander("Image summaries (Moondream)", expanded=False):
             try:
                 summaries = api.get_image_summaries(st.session_state.token)
@@ -551,6 +784,7 @@ with st.sidebar:
     st.divider()
     st.caption("DeepCampus v2 · BGE-M3 hybrid + Qdrant · Local Ollama LLMs")
 
+
 # ────────────────────────────────────────────────────────────────────────────
 # Main screen
 # ────────────────────────────────────────────────────────────────────────────
@@ -561,13 +795,20 @@ SUGGESTIONS = [
     "Explain a figure or chart from the most relevant document.",
 ]
 
+active_session = next(
+    (s for s in (st.session_state.sessions or [])
+     if s["session_id"] == st.session_state.active_session_id),
+    None,
+)
+active_title = active_session["title"] if active_session else "General Chat"
+
 if not st.session_state.messages:
     picked = welcome_screen(st.session_state.username, SUGGESTIONS)
     if picked:
         st.session_state.pending_query = picked
 else:
     hero(
-        "DeepCampus",
+        f"DeepCampus · {active_title}",
         "Hybrid retrieval (BGE-M3 dense + sparse, RRF-fused) with multimodal "
         "PDF context. Ask anything — every claim is grounded.",
     )
@@ -590,7 +831,7 @@ if _STT_AVAILABLE:
             st.session_state.pending_query = spoken
 
 # Message submission
-typed = st.chat_input("Ask a question about the documents...")
+typed = st.chat_input(f"Ask a question in '{active_title}'...")
 user_query = st.session_state.pending_query or typed
 st.session_state.pending_query = None
 
@@ -617,6 +858,7 @@ if user_query:
         tokens: list[str] = []
         start = time.perf_counter()
         ttft: float | None = None
+        resolved_session_id: str | None = None
 
         try:
             for event in api.stream_query(
@@ -625,9 +867,12 @@ if user_query:
                 model=st.session_state.selected_model,
                 temperature=st.session_state.temperature,
                 top_k=st.session_state.k_value,
+                session_id=st.session_state.active_session_id,
             ):
                 etype = event.get("event")
-                if etype == "sources":
+                if etype == "session":
+                    resolved_session_id = event.get("data")
+                elif etype == "sources":
                     sources_buffer += (event.get("data") or "")
                     status_box.update(label="Generating answer...", state="running")
                 elif etype == "token":
@@ -679,6 +924,14 @@ if user_query:
                     "ts": timestamp_now(),
                 }
             )
+
+            # Backend may have promoted the request to General Chat
+            # (stale session_id from cookie). Mirror the resolution so
+            # the next message goes to the same place.
+            if resolved_session_id and resolved_session_id != st.session_state.active_session_id:
+                st.session_state.active_session_id = resolved_session_id
+                ses.update_active_session(resolved_session_id)
+                _refresh_sessions()
         except api.ApiError as exc:
             status_box.update(label="Error", state="error")
             st.error(str(exc))

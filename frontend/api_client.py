@@ -64,17 +64,120 @@ def register(
     return resp.json()
 
 
-def get_history(token: str) -> list[dict]:
-    resp = requests.get(f"{BACKEND_URL}/chat/history", headers=_headers(token), timeout=10)
+def get_login_url(redirect_uri: str) -> str:
+    """Ask the backend for the Keycloak `/auth` URL to redirect to."""
+    resp = requests.get(
+        f"{BACKEND_URL}/auth/login-url",
+        params={"redirect_uri": redirect_uri},
+        timeout=10,
+    )
+    if resp.status_code != 200:
+        raise ApiError(resp.json().get("detail", "login-url failed"))
+    return resp.json()["url"]
+
+
+def exchange_code(code: str, redirect_uri: str) -> dict:
+    """Trade a Keycloak callback `code` for a TokenResponse."""
+    resp = requests.post(
+        f"{BACKEND_URL}/auth/exchange-code",
+        json={"code": code, "redirect_uri": redirect_uri},
+        timeout=15,
+    )
+    if resp.status_code != 200:
+        raise ApiError(resp.json().get("detail", "Code exchange failed"))
+    return resp.json()
+
+
+def get_logout_url(redirect_uri: str, id_token_hint: str | None = None) -> str:
+    params = {"redirect_uri": redirect_uri}
+    if id_token_hint:
+        params["id_token_hint"] = id_token_hint
+    resp = requests.get(
+        f"{BACKEND_URL}/auth/logout-url",
+        params=params,
+        timeout=10,
+    )
+    if resp.status_code != 200:
+        raise ApiError(resp.json().get("detail", "logout-url failed"))
+    return resp.json()["url"]
+
+
+def get_history(token: str, session_id: str | None = None) -> tuple[list[dict], str]:
+    """Return (messages, resolved_session_id). Backend falls back to General Chat
+    if `session_id` is None or stale."""
+    params = {"session_id": session_id} if session_id else {}
+    resp = requests.get(
+        f"{BACKEND_URL}/chat/history",
+        headers=_headers(token),
+        params=params,
+        timeout=10,
+    )
     if resp.status_code != 200:
         raise ApiError(resp.json().get("detail", "History failed"))
-    return resp.json().get("messages", [])
+    body = resp.json()
+    return body.get("messages", []), body.get("session_id", "")
 
 
-def clear_history(token: str) -> None:
-    resp = requests.delete(f"{BACKEND_URL}/chat/history", headers=_headers(token), timeout=10)
+def clear_history(token: str, session_id: str | None = None) -> None:
+    params = {"session_id": session_id} if session_id else {}
+    resp = requests.delete(
+        f"{BACKEND_URL}/chat/history",
+        headers=_headers(token),
+        params=params,
+        timeout=10,
+    )
     if resp.status_code not in (200, 204):
         raise ApiError("Failed to clear history")
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Sessions ("Topics")
+# ─────────────────────────────────────────────────────────────────────────
+def list_sessions(token: str) -> list[dict]:
+    resp = requests.get(
+        f"{BACKEND_URL}/chat/sessions", headers=_headers(token), timeout=10
+    )
+    if resp.status_code != 200:
+        raise ApiError(resp.json().get("detail", "Sessions failed"))
+    return resp.json().get("sessions", [])
+
+
+def create_session(token: str, title: str) -> dict:
+    resp = requests.post(
+        f"{BACKEND_URL}/chat/sessions",
+        json={"title": title},
+        headers=_headers(token),
+        timeout=10,
+    )
+    if resp.status_code not in (200, 201):
+        raise ApiError(resp.json().get("detail", "Create session failed"))
+    return resp.json()
+
+
+def rename_session(token: str, session_id: str, title: str) -> dict:
+    resp = requests.patch(
+        f"{BACKEND_URL}/chat/sessions/{session_id}",
+        json={"title": title},
+        headers=_headers(token),
+        timeout=10,
+    )
+    if resp.status_code != 200:
+        raise ApiError(resp.json().get("detail", "Rename failed"))
+    return resp.json()
+
+
+def delete_session(token: str, session_id: str) -> None:
+    resp = requests.delete(
+        f"{BACKEND_URL}/chat/sessions/{session_id}",
+        headers=_headers(token),
+        timeout=10,
+    )
+    if resp.status_code not in (200, 204):
+        try:
+            detail = resp.json().get("detail", "Delete failed")
+        except json.JSONDecodeError:
+            detail = "Delete failed"
+        raise ApiError(detail)
 
 
 def list_models(token: str) -> dict:
@@ -114,8 +217,15 @@ def stream_query(
     model: str | None,
     temperature: float,
     top_k: int,
+    session_id: str | None = None,
 ) -> Iterator[dict]:
-    payload = {"query": query, "model": model, "temperature": temperature, "top_k": top_k}
+    payload = {
+        "query": query,
+        "model": model,
+        "temperature": temperature,
+        "top_k": top_k,
+        "session_id": session_id,
+    }
     with requests.post(
         f"{BACKEND_URL}/chat/query",
         json=payload,

@@ -1,4 +1,4 @@
-"""Chat endpoints: history, clear, streaming query."""
+"""Chat endpoints: sessions ("topics") + history + streaming query."""
 from __future__ import annotations
 
 import json
@@ -14,11 +14,25 @@ from backend.schemas import (
     ChatHistoryResponse,
     ChatMessage,
     ChatQueryRequest,
+    ChatSessionInfo,
+    ChatSessionListResponse,
+    CreateSessionRequest,
     ModelListResponse,
     PullModelRequest,
+    RenameSessionRequest,
 )
 from backend.security import CurrentUser, get_current_user
-from services.auth import clear_chat_history, load_chat_history, save_message
+from services.auth import (
+    clear_chat_messages,
+    create_session,
+    delete_session,
+    ensure_general_chat,
+    list_sessions,
+    load_chat_history,
+    resolve_session,
+    save_message,
+    update_session_title,
+)
 from services.config import settings
 from services.llm import (
     benchmark_models,
@@ -38,16 +52,86 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 _IMAGE_TAG_RE = re.compile(r"\[(?:GÖRSEL|IMAGE|RESIM|RESİM):\s*(.*?)\]", re.IGNORECASE)
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Sessions (chat "topics")
+# ─────────────────────────────────────────────────────────────────────────
+@router.get("/sessions", response_model=ChatSessionListResponse)
+def get_sessions(
+    user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> ChatSessionListResponse:
+    """List the user's chat sessions; auto-creates General Chat on first call."""
+    ensure_general_chat(user.username)
+    sessions = list_sessions(user.username)
+    return ChatSessionListResponse(
+        sessions=[ChatSessionInfo(**s) for s in sessions]
+    )
+
+
+@router.post("/sessions", response_model=ChatSessionInfo, status_code=status.HTTP_201_CREATED)
+def post_session(
+    payload: CreateSessionRequest,
+    user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> ChatSessionInfo:
+    s = create_session(user.username, payload.title)
+    return ChatSessionInfo(**s)
+
+
+@router.patch("/sessions/{session_id}", response_model=ChatSessionInfo)
+def patch_session(
+    session_id: str,
+    payload: RenameSessionRequest,
+    user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> ChatSessionInfo:
+    if not update_session_title(user.username, session_id, payload.title):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot rename this session (not found, not owned, or default).",
+        )
+    return ChatSessionInfo(
+        session_id=session_id,
+        title=payload.title.strip(),
+        is_default=False,
+    )
+
+
+@router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+def remove_session(
+    session_id: str,
+    user: Annotated[CurrentUser, Depends(get_current_user)],
+) -> None:
+    if not delete_session(user.username, session_id):
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete this session (not found, not owned, or default).",
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# History
+# ─────────────────────────────────────────────────────────────────────────
 @router.get("/history", response_model=ChatHistoryResponse)
-def get_history(user: Annotated[CurrentUser, Depends(get_current_user)]) -> ChatHistoryResponse:
-    messages = [ChatMessage(**m) for m in load_chat_history(user.username)]
-    return ChatHistoryResponse(messages=messages)
+def get_history(
+    user: Annotated[CurrentUser, Depends(get_current_user)],
+    session_id: str | None = Query(None),
+) -> ChatHistoryResponse:
+    resolved = resolve_session(user.username, session_id)
+    messages = [ChatMessage(**m) for m in load_chat_history(resolved)]
+    return ChatHistoryResponse(messages=messages, session_id=resolved)
 
 
 @router.delete("/history", status_code=status.HTTP_204_NO_CONTENT)
-def delete_history(user: Annotated[CurrentUser, Depends(get_current_user)]) -> None:
-    clear_chat_history(user.username)
+def delete_history(
+    user: Annotated[CurrentUser, Depends(get_current_user)],
+    session_id: str | None = Query(None),
+) -> None:
+    """Wipe a single session's messages. Defaults to General Chat."""
+    resolved = resolve_session(user.username, session_id)
+    clear_chat_messages(resolved)
 
+
+# ─────────────────────────────────────────────────────────────────────────
+# Models (LLM choice)
+# ─────────────────────────────────────────────────────────────────────────
 def _model_is_pulled(target: str, pulled: list[str]) -> bool:
     """Tag-agnostic membership: 'llama3' matches 'llama3:latest' and vice versa."""
     if target in pulled:
@@ -59,8 +143,6 @@ def _model_is_pulled(target: str, pulled: list[str]) -> bool:
         if p.split(":", 1)[0] == target_base:
             return True
     return False
-
-
 
 
 @router.get("/models", response_model=ModelListResponse)
@@ -94,6 +176,9 @@ def trigger_pull(
     return StreamingResponse(event_stream(), media_type="application/x-ndjson")
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Streaming RAG query
+# ─────────────────────────────────────────────────────────────────────────
 @router.post("/query")
 def query_chat(
     payload: ChatQueryRequest,
@@ -102,13 +187,15 @@ def query_chat(
     """Stream a hybrid-RAG answer as Server-Sent Events.
 
     Stream protocol (one JSON object per line):
+      {"event":"session","data":"<resolved-session-uuid>"}
       {"event":"sources","data":"..."}
       {"event":"token","data":"..."}
       {"event":"images","data":["path1","path2"]}
       {"event":"done"}
     """
-    save_message(user.username, "user", payload.query)
-    history = load_chat_history(user.username)
+    session_id = resolve_session(user.username, payload.session_id)
+    save_message(session_id, user.username, "user", payload.query)
+    history = load_chat_history(session_id)
 
     try:
         chunks = hybrid_search(payload.query, top_k=payload.top_k)
@@ -133,6 +220,7 @@ def query_chat(
     model_name = payload.model or settings.models.llm_model
 
     def event_stream():
+        yield json.dumps({"event": "session", "data": session_id}) + "\n"
         yield json.dumps({"event": "sources", "data": sources_line}) + "\n"
         collected: list[str] = []
         try:
@@ -150,6 +238,7 @@ def query_chat(
         final_answer = _IMAGE_TAG_RE.sub("", raw_answer).strip()
 
         save_message(
+            session_id,
             user.username,
             "assistant",
             final_answer,

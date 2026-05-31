@@ -135,11 +135,16 @@ class AuthSettings:
 class KeycloakSettings:
     """Keycloak OIDC client configuration.
 
-    `url` is the in-Docker hostname for backend-to-Keycloak calls; the
-    browser talks to localhost:8080 directly. `admin_*` are master-realm
-    credentials used by the Admin API path for registering new users.
+    `url` is the in-Docker hostname for backend-to-Keycloak calls
+    (token exchange, JWKS fetch, Admin API). `public_url` is the
+    browser-facing hostname embedded in Authorization Code redirects
+    — the user's browser has to reach Keycloak directly, so this must
+    be a host the browser can resolve (typically localhost:8080 in
+    dev). `admin_*` are master-realm credentials used by the Admin
+    API path for registering new users.
     """
     url: str = field(default_factory=lambda: _env_str("KEYCLOAK_URL", "http://keycloak:8080"))
+    public_url: str = field(default_factory=lambda: _env_str("KEYCLOAK_PUBLIC_URL", "http://localhost:8080"))
     realm: str = field(default_factory=lambda: _env_str("KEYCLOAK_REALM", "deepcampus"))
     client_id: str = field(default_factory=lambda: _env_str("KEYCLOAK_CLIENT_ID", "streamlit-app"))
     admin_user: str = field(default_factory=lambda: _env_str("KEYCLOAK_ADMIN", "adminn"))
@@ -154,6 +159,18 @@ class BackendSettings:
 
 
 @dataclass(frozen=True)
+class FrontendSettings:
+    """Frontend host configuration.
+
+    `url` is the browser-facing Streamlit address used as the OAuth
+    Authorization Code redirect_uri. Must match a redirect URI accepted
+    by the Keycloak `streamlit-app` client (the seeded realm uses
+    `["*"]` for dev, tighten this for production).
+    """
+    url: str = field(default_factory=lambda: _env_str("FRONTEND_URL", "http://localhost:8501"))
+
+
+@dataclass(frozen=True)
 class Settings:
     paths: Paths = field(default_factory=Paths)
     models: ModelSettings = field(default_factory=ModelSettings)
@@ -162,6 +179,7 @@ class Settings:
     auth: AuthSettings = field(default_factory=AuthSettings)
     keycloak: KeycloakSettings = field(default_factory=KeycloakSettings)
     backend: BackendSettings = field(default_factory=BackendSettings)
+    frontend: FrontendSettings = field(default_factory=FrontendSettings)
 
 
 settings = Settings()

@@ -26,6 +26,7 @@ the user is an instructor, otherwise student. Defaults to student.
 from __future__ import annotations
 
 import json
+import urllib.parse
 from functools import lru_cache
 
 import jwt
@@ -46,6 +47,22 @@ def _token_url() -> str:
     return (
         f"{settings.keycloak.url}/realms/{settings.keycloak.realm}"
         f"/protocol/openid-connect/token"
+    )
+
+
+def _public_auth_url() -> str:
+    """Browser-facing authorize endpoint. Uses the public Keycloak host."""
+    return (
+        f"{settings.keycloak.public_url}/realms/{settings.keycloak.realm}"
+        f"/protocol/openid-connect/auth"
+    )
+
+
+def _public_logout_url() -> str:
+    """Browser-facing end-session endpoint."""
+    return (
+        f"{settings.keycloak.public_url}/realms/{settings.keycloak.realm}"
+        f"/protocol/openid-connect/logout"
     )
 
 
@@ -92,6 +109,69 @@ def login(username: str, password: str) -> dict:
             detail = "Invalid credentials"
         raise KeycloakError(detail)
     return resp.json()
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Authorization Code flow (browser-initiated login)
+# ─────────────────────────────────────────────────────────────────────────
+def build_login_url(redirect_uri: str) -> str:
+    """Construct the Keycloak `/auth` URL the browser should hit.
+
+    Uses the public Keycloak hostname (not the in-Docker hostname) so
+    the user's browser can actually reach Keycloak. The realm config
+    has standardFlowEnabled=true and redirectUris=['*'], so any
+    callback URL the frontend chooses is accepted.
+    """
+    params = {
+        "client_id": settings.keycloak.client_id,
+        "response_type": "code",
+        "redirect_uri": redirect_uri,
+        "scope": "openid profile email",
+    }
+    return f"{_public_auth_url()}?{urllib.parse.urlencode(params)}"
+
+
+def exchange_code(code: str, redirect_uri: str) -> dict:
+    """Trade a callback `code` for the realm token bundle.
+
+    Backend-side call (server-to-server) so it uses the internal
+    Keycloak hostname. Returns the full token response, including
+    `id_token` which is later required for a silent logout.
+    """
+    data = {
+        "grant_type": "authorization_code",
+        "client_id": settings.keycloak.client_id,
+        "code": code,
+        "redirect_uri": redirect_uri,
+    }
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    try:
+        resp = requests.post(_token_url(), data=data, headers=headers, timeout=10)
+    except requests.RequestException as exc:
+        raise KeycloakError(f"Keycloak unreachable: {exc}") from exc
+    if resp.status_code != 200:
+        try:
+            detail = resp.json().get("error_description", "Code exchange failed")
+        except (json.JSONDecodeError, ValueError):
+            detail = "Code exchange failed"
+        raise KeycloakError(detail)
+    return resp.json()
+
+
+def build_logout_url(redirect_uri: str, id_token_hint: str | None = None) -> str:
+    """Construct the Keycloak end-session URL for a one-tap logout.
+
+    `id_token_hint` skips the Keycloak "confirm logout" page; without it
+    Keycloak will ask the user to confirm. We pass `client_id` too as a
+    fallback for the no-id-token case.
+    """
+    params: dict[str, str] = {
+        "post_logout_redirect_uri": redirect_uri,
+        "client_id": settings.keycloak.client_id,
+    }
+    if id_token_hint:
+        params["id_token_hint"] = id_token_hint
+    return f"{_public_logout_url()}?{urllib.parse.urlencode(params)}"
 
 
 # ─────────────────────────────────────────────────────────────────────────

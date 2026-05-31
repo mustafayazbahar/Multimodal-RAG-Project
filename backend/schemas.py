@@ -23,9 +23,26 @@ class RegisterRequest(BaseModel):
 
 class TokenResponse(BaseModel):
     access_token: str
+    # id_token is only present on browser-initiated logins (the OAuth
+    # Code flow); password-grant responses leave it None. We need it
+    # to drive a silent Keycloak logout — without it the IdP shows a
+    # "do you want to log out?" confirm screen.
+    id_token: Optional[str] = None
     token_type: str = "bearer"
     role: str
     username: str
+
+
+class ExchangeCodeRequest(BaseModel):
+    """Browser hands back the `?code=` from a Keycloak redirect plus the
+    redirect_uri that was used when building the original auth URL —
+    Keycloak validates the two match."""
+    code: str
+    redirect_uri: str
+
+
+class OauthUrlResponse(BaseModel):
+    url: str
 
 
 class ChatMessage(BaseModel):
@@ -37,10 +54,33 @@ class ChatMessage(BaseModel):
 
 class ChatHistoryResponse(BaseModel):
     messages: list[ChatMessage]
+    session_id: str
+
+
+class ChatSessionInfo(BaseModel):
+    session_id: str
+    title: str
+    is_default: bool = False
+    created_at: Optional[str] = None
+
+
+class ChatSessionListResponse(BaseModel):
+    sessions: list[ChatSessionInfo]
+
+
+class CreateSessionRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+
+
+class RenameSessionRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
 
 
 class ChatQueryRequest(BaseModel):
     query: str
+    # Optional — server falls back to the user's General Chat when
+    # omitted or unknown.
+    session_id: Optional[str] = None
     model: Optional[str] = None
     temperature: float = Field(default=0.3, ge=0.0, le=1.0)
     top_k: int = Field(default=20, ge=1, le=50)

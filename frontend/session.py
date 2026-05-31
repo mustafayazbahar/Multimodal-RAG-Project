@@ -75,7 +75,12 @@ def _storage() -> "LocalStorage | None":
 
 
 def _decode(raw: object) -> dict | None:
-    """Best-effort parser: handles JSON strings, plain dicts, and junk."""
+    """Best-effort parser: handles JSON strings, plain dicts, and junk.
+
+    The optional `session_id` and `id_token` keys are tolerated when
+    present (added in the v2.5 Topics + OAuth Code flow). Older blobs
+    without them still validate.
+    """
     if raw is None or raw == "":
         return None
     if isinstance(raw, dict):
@@ -106,18 +111,56 @@ def load_cookie() -> dict | None:
     return _decode(raw)
 
 
-def save_cookie(token: str, username: str, role: str) -> None:
-    """Persist {token, username, role} as a JSON blob in localStorage."""
+def save_cookie(
+    token: str,
+    username: str,
+    role: str,
+    id_token: str | None = None,
+    active_session_id: str | None = None,
+) -> None:
+    """Persist auth + UI state as a JSON blob in localStorage.
+
+    `id_token` is needed for a silent OAuth logout (no Keycloak confirm
+    page). `active_session_id` lets F5 restore the chat thread the
+    user was looking at — without it every refresh dumps them back on
+    General Chat.
+    """
     ls = _storage()
     if ls is None:
         return
-    payload = json.dumps({"token": token, "username": username, "role": role})
+    payload = json.dumps(
+        {
+            "token": token,
+            "username": username,
+            "role": role,
+            "id_token": id_token,
+            "active_session_id": active_session_id,
+        }
+    )
     try:
         ls.setItem(SESSION_KEY, payload)
     except Exception:  # noqa: BLE001
         # localStorage write can fail on Safari private mode. Don't
         # crash the auth flow — degrade to "session lasts until F5".
         pass
+
+
+def update_active_session(active_session_id: str | None) -> None:
+    """Re-write the cookie with a new active_session_id, keeping auth fields.
+
+    Used when the user switches Topics; we need to remember which one
+    so F5 lands them back on the same thread.
+    """
+    cookie = load_cookie()
+    if not cookie:
+        return
+    save_cookie(
+        token=cookie["token"],
+        username=cookie["username"],
+        role=cookie["role"],
+        id_token=cookie.get("id_token"),
+        active_session_id=active_session_id,
+    )
 
 
 def clear_cookie() -> None:
@@ -150,6 +193,11 @@ def hydrate_from_cookie() -> None:
         st.session_state.token = cookie["token"]
         st.session_state.username = cookie["username"]
         st.session_state.role = cookie["role"]
+        # New (v2.5) optional fields; missing on legacy blobs.
+        if cookie.get("id_token"):
+            st.session_state["id_token"] = cookie["id_token"]
+        if cookie.get("active_session_id"):
+            st.session_state["active_session_id"] = cookie["active_session_id"]
         st.session_state["_ls_attempts"] = 0
         return
 

@@ -91,11 +91,18 @@ services:
       - LOG_LEVEL=INFO
       # Keycloak — auth is now delegated to it; legacy bcrypt admin
       # variables are kept for backwards compatibility but unused.
+      # KEYCLOAK_URL is for in-Docker calls (token exchange, JWKS).
+      # KEYCLOAK_PUBLIC_URL is embedded in browser-facing OAuth
+      # redirects, so it must be reachable from the user's browser
+      # (typically localhost:8080 in dev).
       - KEYCLOAK_URL=http://keycloak:8080
+      - KEYCLOAK_PUBLIC_URL=${KEYCLOAK_PUBLIC_URL:-http://localhost:8080}
       - KEYCLOAK_REALM=${KEYCLOAK_REALM:-deepcampus}
       - KEYCLOAK_CLIENT_ID=${KEYCLOAK_CLIENT_ID:-streamlit-app}
       - KEYCLOAK_ADMIN=${KEYCLOAK_ADMIN:-adminn}
       - KEYCLOAK_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD:-admin123}
+      # Frontend URL — used as the OAuth Code-flow redirect_uri.
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:8501}
       # Override these in .env for production
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
@@ -130,6 +137,10 @@ services:
       - "8501:8501"
     environment:
       - BACKEND_URL=http://backend:8000
+      # Used by the Streamlit OAuth callback handler when asking the
+      # backend to build a Keycloak login URL — must match the browser-
+      # facing Streamlit address.
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:8501}
     depends_on:
       backend:
         condition: service_healthy
