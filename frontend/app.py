@@ -329,37 +329,53 @@ def _redirect_top_window(url: str) -> None:
     `<meta http-equiv="refresh">` inside `st.markdown` only refreshes
     Streamlit's inner iframe, not the parent page; a Keycloak login or
     end-session URL has to land in the top window for the cookie flow
-    to take effect. We inject a tiny components iframe whose script
-    bumps `window.top.location.href` — same-origin (both iframes live
-    on the Streamlit host) so the navigation is allowed.
+    to take effect. We inject a small components iframe whose script
+    bumps `window.top.location.replace(...)` — same-origin (both
+    iframes live on the Streamlit host) so the navigation is allowed.
+
+    Important caveats:
+    - The iframe must have a non-zero size. With `height=0` Streamlit
+      sometimes skipped mounting it entirely, leaving the user on a
+      black screen.
+    - A short `setTimeout` defers the navigation until after the
+      iframe's onload — without it the click occasionally raced the
+      mount and the script simply never fired.
+    - We render a visible "Redirecting…" hint first so the user has
+      feedback while the navigation kicks in. The hint stays put
+      because `st.stop()` halts further script execution; the redirect
+      itself usually completes within ~100 ms.
     """
+    st.info("Redirecting to Keycloak…")
     safe_url = json.dumps(url)
     st.components.v1.html(
         f"""
+        <!DOCTYPE html>
+        <html><head><meta charset="utf-8"></head>
+        <body>
         <script>
             (function() {{
-                try {{
-                    window.top.location.href = {safe_url};
-                }} catch (e) {{
-                    // Fallback for any cross-origin edge case.
-                    window.location.href = {safe_url};
-                }}
+                var url = {safe_url};
+                var go = function() {{
+                    try {{
+                        window.top.location.replace(url);
+                    }} catch (e) {{
+                        try {{
+                            window.parent.location.replace(url);
+                        }} catch (e2) {{
+                            window.location.replace(url);
+                        }}
+                    }}
+                }};
+                // Defer briefly so the iframe is fully mounted before
+                // we navigate the parent away from under it.
+                setTimeout(go, 80);
             }})();
         </script>
+        </body></html>
         """,
-        height=0,
+        height=1,
     )
     st.stop()
-
-
-def _start_keycloak_login() -> None:
-    """Redirect the browser to Keycloak's authorize page (OAuth Code flow)."""
-    try:
-        login_url = api.get_login_url(FRONTEND_URL)
-    except api.ApiError as exc:
-        st.error(f"Could not reach the backend: {exc}")
-        return
-    _redirect_top_window(login_url)
 
 
 def _post_auth_success(data: dict) -> None:
@@ -448,13 +464,30 @@ if not _logged_in():
         # is kept under a fallback expander for headless / API-style
         # access and for environments where the Keycloak host isn't
         # browser-reachable.
-        st.button(
+        #
+        # Why if-block instead of on_click: Streamlit runs on_click
+        # callbacks *before* rendering the rest of the script. Calling
+        # `st.stop()` inside the callback (which `_redirect_top_window`
+        # does) halts execution before hero/form/anything else gets
+        # painted, leaving the user on a black page until the redirect
+        # iframe mounts — sometimes it doesn't, and they're stuck. The
+        # if-block runs *after* the page has been painted, so even if
+        # the redirect stalls there's a visible login screen to fall
+        # back to.
+        if st.button(
             "🔐 Sign in with Keycloak",
             type="primary",
             use_container_width=True,
-            on_click=_start_keycloak_login,
+            key="kc_login_btn",
             help="Opens the Keycloak login page in this tab.",
-        )
+        ):
+            try:
+                kc_login_url = api.get_login_url(FRONTEND_URL)
+            except api.ApiError as exc:
+                st.error(f"Could not reach the backend: {exc}")
+            else:
+                _redirect_top_window(kc_login_url)
+
         st.caption(
             "Recommended. Your password is entered on Keycloak's own login "
             "page — it never flows through DeepCampus."
