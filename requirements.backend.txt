@@ -19,6 +19,11 @@ requests>=2.31,<3.0
 PyMuPDF>=1.24,<2.0
 Pillow>=10.0,<12.0
 easyocr>=1.7,<2.0
+# Docling: IBM'in PDF layout + tablo (TableFormer) + figür çıkarım pipeline'ı.
+# PyMuPDF'in gözden kaçırdığı vektör tabloları/figürleri raster olarak çıkarıp
+# Moondream2'ye besler. PyMuPDF + EasyOCR fallback olarak duruyor — docling
+# açılamayan / desteklenmeyen bir PDF olursa ingestion devam edebilsin.
+docling>=2.0,<3.0
 
 # --- LangChain (used for chunking & doc abstraction) ---
 langchain-core>=0.3,<0.4

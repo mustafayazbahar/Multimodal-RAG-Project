@@ -25,6 +25,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from services.config import settings
 from services.embeddings import embed_passages
 from services.logging_config import get_logger
+from services import pdf_extractor
 from services.pdf_fingerprint import compute_fingerprint
 from services.vectorstore import ensure_collection, fingerprint_exists, upsert_chunks
 
@@ -164,16 +165,16 @@ def _summarize_image(model, tokenizer, image_path: Path) -> str:
         return "Image content could not be analyzed."
 
 
-def _extract_pdf(
+def _extract_pdf_pymupdf(
     pdf_path: Path,
     fingerprint_hash: str,
-    img_root: Path,
+    img_folder: Path,
     vlm_model,
     vlm_tokenizer,
     ocr_reader,
 ) -> list[Document]:
+    """Legacy PyMuPDF + EasyOCR extraction path; kept as Docling fallback."""
     docs: list[Document] = []
-    img_folder = img_root / pdf_path.stem
     img_folder.mkdir(parents=True, exist_ok=True)
 
     with fitz.open(pdf_path) as pdf:
@@ -226,6 +227,95 @@ def _extract_pdf(
                         },
                     )
                 )
+    return docs
+
+
+def _extract_pdf(
+    pdf_path: Path,
+    fingerprint_hash: str,
+    img_root: Path,
+    vlm_model,
+    vlm_tokenizer,
+    ocr_reader,
+) -> list[Document]:
+    """Primary extraction entry point: Docling first, PyMuPDF on failure.
+
+    Docling gives us layout-aware text + TableFormer-detected tables + figure
+    crops as PIL images. PyMuPDF only saw embedded raster images and missed
+    almost every vector diagram and most tables. If Docling fails for any
+    reason (unsupported PDF variant, corrupted file, model download failure)
+    we degrade to the legacy path so the PDF still indexes.
+    """
+    img_folder = img_root / pdf_path.stem
+    img_folder.mkdir(parents=True, exist_ok=True)
+
+    try:
+        text_blocks, image_blocks = pdf_extractor.extract(pdf_path, img_folder)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "Docling extraction failed for %s (%s) — falling back to PyMuPDF.",
+            pdf_path.name, exc,
+        )
+        return _extract_pdf_pymupdf(
+            pdf_path, fingerprint_hash, img_folder,
+            vlm_model, vlm_tokenizer, ocr_reader,
+        )
+
+    docs: list[Document] = []
+
+    for block in text_blocks:
+        if not block.text:
+            continue
+        docs.append(
+            Document(
+                page_content=block.text,
+                metadata={
+                    "source": pdf_path.name,
+                    "page": block.page,
+                    "type": "text",
+                    "fingerprint": fingerprint_hash,
+                },
+            )
+        )
+
+    seen_image_hashes: set[str] = set()
+    for block in image_blocks:
+        img_path = Path(block.image_path)
+        try:
+            image_bytes = img_path.read_bytes()
+        except OSError:
+            continue
+        if len(image_bytes) < settings.rag.min_image_bytes:
+            # Tiny crops are usually icons / decorative; skip them.
+            try:
+                img_path.unlink()
+            except OSError:
+                pass
+            continue
+        img_hash = hashlib.md5(image_bytes).hexdigest()
+        if img_hash in seen_image_hashes:
+            try:
+                img_path.unlink()
+            except OSError:
+                pass
+            continue
+        seen_image_hashes.add(img_hash)
+
+        summary = _summarize_image(vlm_model, vlm_tokenizer, img_path)
+        docs.append(
+            Document(
+                page_content=f"[IMAGE SUMMARY]: {summary}",
+                metadata={
+                    "source": pdf_path.name,
+                    "page": block.page,
+                    "type": "image",
+                    "image_path": str(img_path),
+                    "fingerprint": fingerprint_hash,
+                    "image_kind": block.kind,
+                },
+            )
+        )
+
     return docs
 
 

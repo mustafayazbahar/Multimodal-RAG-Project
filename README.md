@@ -14,6 +14,8 @@
 
 > **DeepCampus** is a **local-first, privacy-preserving** Multimodal RAG system designed for academic research. It reads, understands, and answers questions about complex PDF documents — including charts, tables, and scanned pages — entirely on your own hardware. No cloud, no API keys, no data leakage.
 
+> **v2.4 update** — **Docling** (IBM) layered into PDF ingestion: layout-aware text + TableFormer-based table extraction + figure cropping, PyMuPDF+EasyOCR kept as automatic fallback. UI is now English-only with a one-click **light / dark theme toggle** at the top of the sidebar; chat-rendered images are capped at 420 px wide; streamed answers are scrubbed of leftover `[GÖRSEL: …]` / `[Figure …]` citation tags. Streamlit is pinned `<1.57` until the four `st.components.v1.html` call sites migrate to `st.html` (deprecated for removal after 2026-06-01). Qdrant upserts are batched (64 points / 120 s client timeout) so large textbooks finish without `ResponseHandlingException: timed out`.
+
 > **v2.3 update** — **Keycloak** identity provider replaces the legacy SQLite+bcrypt auth; OAuth2 password-grant flow, realm bootstrap on first start, role assignment via Admin API, Moondream image captions persisted to a human-readable JSON file.
 
 > **v2.2 update** — voice I/O (TR + EN), localStorage-backed F5-proof sessions, reset-knowledge-base button, tag-aware model matching, robust image rendering, and the conservative dedup model (file + content hash; metadata-only dedup removed to kill false positives).
@@ -31,12 +33,12 @@
 | 🗄️ **Qdrant Vector DB** | Named dense (1024-d) + sparse vectors | Fast filtering, payload indexes for dedup, persistent storage |
 | 👁️ **Visual Intelligence** | Moondream2 VLM | Summarizes charts, tables, diagrams inside PDFs |
 | 📑 **Smart PDF Dedup** | File hash + content fingerprint | Catches same paper saved under a different filename or re-stamped headers, without false positives on shared titles |
-| 📄 **Hybrid OCR** | PyMuPDF + EasyOCR | Digital text extraction with scanned-page fallback (TR + EN) |
+| 📄 **Layout-aware PDF parsing** | **Docling** (TableFormer) + PyMuPDF + EasyOCR fallback | Docling handles reading order, OCR on scans, table-structure recognition, and figure cropping; PyMuPDF+EasyOCR kicks in if Docling can't open a PDF |
 | 🎙️ **Voice I/O** | Browser Web Speech API | Mic-to-text **and** "Sesli oku" TTS in TR or EN — audio never leaves the device |
 | 🔐 **Keycloak Auth (OIDC)** | Keycloak realm + password grant | Instructor / Student roles, Admin API user creation, RS256-signed JWTs verified against the realm JWKS |
 | 💾 **Refresh-proof Login** | Browser localStorage | F5 keeps you signed in; no JWT in the URL, no third-party cookie blocking |
 | 🧹 **Reset Knowledge Base** | One-click sidebar action | Drops the Qdrant collection + state file so the next ingest is fresh |
-| 🎨 **Modern UI** | Amber-on-dark, system-aware | Avatar chat bubbles, source cards, welcome screen, sliders w/ tooltips |
+| 🎨 **Modern UI** | Amber accent, **explicit light/dark toggle** | English-only labels, avatar chat bubbles, source cards, welcome screen, sliders w/ tooltips, chat images capped at 420 px |
 | 🖼️ **Moondream Caption Log** | `data/image_summaries.json` + UI expander | Every VLM-generated figure description is persisted so you can verify what the model "saw" |
 | 🐳 **5-Service Stack** | Docker Compose | keycloak + qdrant + ollama + backend (FastAPI) + frontend (Streamlit) |
 
@@ -91,15 +93,15 @@ This sequential approach prevents OOM on 16 GB consumer GPUs (tested on RTX 4080
 
 | Layer | Technology |
 |---|---|
-| Frontend | Streamlit ≥ 1.36 + `streamlit-local-storage` (session) + `streamlit-mic-recorder` (STT) |
+| Frontend | Streamlit ≥ 1.36, **<1.57** (deprecation cap) + `streamlit-local-storage` (session) + `streamlit-mic-recorder` (STT) |
 | Backend | FastAPI 0.110+ • Uvicorn • PyJWT |
 | LLM Inference | Ollama + `{Llama 3.1 8B q8 • Qwen2.5 14B q4 • Gemma 2 9B q4}` |
 | Visual Language Model | Moondream2 (2024-08-26 revision) |
 | Embeddings | `BAAI/bge-m3` — 1024-d dense + lexical sparse |
-| Vector Store | **Qdrant ≥ 1.11** (named dense + sparse, payload indexes) |
+| Vector Store | **Qdrant ≥ 1.11** (named dense + sparse, payload indexes) — batched upserts (64 / 120 s) |
 | Hybrid Fusion | Weighted Reciprocal Rank Fusion (RRF) |
-| PDF Parsing | PyMuPDF (fitz) |
-| OCR Fallback | EasyOCR (TR + EN) |
+| PDF Parsing | **Docling 2.x** (primary: layout + TableFormer + figure crops) → PyMuPDF fallback |
+| OCR | Docling's built-in OCR; EasyOCR (TR + EN) on the PyMuPDF fallback path |
 | Chunking | BGE-M3 tokenizer (1024 tok / 128 overlap) |
 | Auth | Keycloak 24 (OAuth2 / OIDC) — RS256 JWTs, realm bootstrap via `--import-realm` |
 | Chat history | SQLite (`data/user.db`) — keyed by Keycloak username |
@@ -138,7 +140,13 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-First build takes 10–15 min (downloads BGE-M3 ≈ 2.3 GB and base images). After that, watch logs with `docker compose logs -f`.
+First build takes 15–25 min on a residential connection (downloads PyTorch CUDA ≈ 2.5 GB, BGE-M3 ≈ 2.3 GB, and base images). The Dockerfiles now use **BuildKit pip cache mounts** (`# syntax=docker/dockerfile:1.4` + `--mount=type=cache,target=/root/.cache/pip`), so any subsequent rebuild reuses the cached wheels and finishes in 2–5 min. Watch live progress with:
+
+```bash
+docker compose --progress=plain up -d --build
+```
+
+> Docling pulls its layout + TableFormer models from HuggingFace on the first ingestion run (~1–2 GB). They cache in the `hf_cache` volume, so re-ingests skip the download.
 
 ### 4. Pull the LLM Models (first run only)
 
@@ -292,15 +300,19 @@ All knobs are env-driven (see `.env.example`). The most impactful ones:
    • file hash         (SHA-256 of bytes)
    • content hash      (normalized text from first 3 pages + title/author)
 3. Check ingest_state.json AND Qdrant payload — skip if either layer matches
-4. For new/changed files:
-   a. Extract page text with PyMuPDF
-   b. If page text < 15 chars → EasyOCR fallback (TR + EN)
-   c. Extract embedded images (> 15 KB, MD5-deduplicated)
-   d. Caption each image with Moondream2
+4. For new/changed files, primary path = Docling:
+   a. Layout-aware text extraction (reading order, headings, paragraphs)
+   b. Built-in OCR on scanned pages
+   c. TableFormer detects tables → crop each as a PNG
+   d. Layout detector crops every picture/figure as a PNG
+   e. Caption each cropped image with Moondream2
+   • If Docling can't open the PDF (corrupted / unsupported), fall back to
+     the legacy PyMuPDF + EasyOCR path so the file still indexes.
 5. Free VLM VRAM, load BGE-M3 tokenizer + model
 6. Chunk all docs at 1024 tokens / 128 overlap using BGE-M3 tokenizer
 7. Embed each chunk → (dense 1024-d, sparse {token: weight})
-8. Upsert into Qdrant with payload {source, page, type, fingerprint}
+8. Upsert into Qdrant in 64-point batches with payload
+   {source, page, type, image_kind, fingerprint}
 9. Update ingest_state.json
 ```
 
@@ -465,10 +477,12 @@ Test cases cover:
 
 ---
 
-## 🎨 UI Highlights (v2.2)
+## 🎨 UI Highlights (v2.4)
 
-- **Modern dark theme** with amber accent (`#F59E0B`)
-- **System-aware**: a `@media (prefers-color-scheme: light)` block remaps surfaces if your OS is in light mode
+- **Modern theme** with amber accent (`#F59E0B`) — dark by default
+- **Explicit light/dark toggle** at the top of the sidebar (☀️ Light theme / 🌙 Dark theme). Theme choice is held in `session_state` and the CSS variables are baked into `:root` per theme; no more half-broken `prefers-color-scheme` fallback
+- **English-only interface** — every label, button, help text, radio option and placeholder is English; voice input/output still supports both Turkish (`tr-TR`) and English (`en-US`) via the Voice section radio
+- **Chat images capped at 420 px** wide so figure crops don't dominate the chat column
 - **Avatar chat bubbles** with role label + timestamp
 - **Source cards**: `PDF` / `IMG` badge, filename, page number
 - **Welcome screen** with clickable example prompts
