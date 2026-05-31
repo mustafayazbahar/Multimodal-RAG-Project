@@ -323,57 +323,36 @@ def _handle_register(
         st.error(str(exc))
 
 
-def _redirect_top_window(url: str) -> None:
-    """Navigate the browser's top window — escapes Streamlit's iframe.
+def _render_redirect_screen(url: str, heading: str) -> None:
+    """Replace the page with a meta-refresh + visible fallback link.
 
-    `<meta http-equiv="refresh">` inside `st.markdown` only refreshes
-    Streamlit's inner iframe, not the parent page; a Keycloak login or
-    end-session URL has to land in the top window for the cookie flow
-    to take effect. We inject a small components iframe whose script
-    bumps `window.top.location.replace(...)` — same-origin (both
-    iframes live on the Streamlit host) so the navigation is allowed.
+    Used by the logout flow. Two reasons not to use a JS redirect via
+    `st.components.v1.html`:
+    - Streamlit's component iframe is sandboxed without
+      `allow-top-navigation`, so `window.top.location = ...` is
+      silently blocked by Chromium and Safari.
+    - The components iframe is its own browsing context — a meta
+      refresh inside it only refreshes the iframe, not the top window.
 
-    Important caveats:
-    - The iframe must have a non-zero size. With `height=0` Streamlit
-      sometimes skipped mounting it entirely, leaving the user on a
-      black screen.
-    - A short `setTimeout` defers the navigation until after the
-      iframe's onload — without it the click occasionally raced the
-      mount and the script simply never fired.
-    - We render a visible "Redirecting…" hint first so the user has
-      feedback while the navigation kicks in. The hint stays put
-      because `st.stop()` halts further script execution; the redirect
-      itself usually completes within ~100 ms.
+    `st.markdown` renders straight into the main Streamlit document
+    (no nested iframe), so a `<meta http-equiv="refresh">` inserted
+    there hits the top window directly. Chrome/Firefox process meta
+    refresh elements added to the body dynamically. If a browser
+    ignores it, the visible "click here" anchor is the user's manual
+    fallback.
     """
-    st.info("Redirecting to Keycloak…")
-    safe_url = json.dumps(url)
-    st.components.v1.html(
+    safe_url = url.replace('"', '&quot;')
+    st.info(heading)
+    st.markdown(
         f"""
-        <!DOCTYPE html>
-        <html><head><meta charset="utf-8"></head>
-        <body>
-        <script>
-            (function() {{
-                var url = {safe_url};
-                var go = function() {{
-                    try {{
-                        window.top.location.replace(url);
-                    }} catch (e) {{
-                        try {{
-                            window.parent.location.replace(url);
-                        }} catch (e2) {{
-                            window.location.replace(url);
-                        }}
-                    }}
-                }};
-                // Defer briefly so the iframe is fully mounted before
-                // we navigate the parent away from under it.
-                setTimeout(go, 80);
-            }})();
-        </script>
-        </body></html>
+        <meta http-equiv="refresh" content="0; url={safe_url}">
+        <p style="margin-top:14px;font-size:0.95rem;">
+            If you are not redirected automatically,
+            <a href="{safe_url}" target="_self"
+               style="color:#F59E0B;font-weight:600;">click here</a>.
+        </p>
         """,
-        height=1,
+        unsafe_allow_html=True,
     )
     st.stop()
 
@@ -405,29 +384,26 @@ def _post_auth_success(data: dict) -> None:
 
 
 def _logout() -> None:
-    """Local logout + Keycloak end-session redirect.
+    """Local logout + queue a Keycloak end-session redirect.
 
-    Order matters:
-    1. Clear localStorage so the next page load can't auto-restore.
-    2. Wipe auth-related session_state keys *selectively* — a wholesale
-       `st.session_state.clear()` also drops Streamlit-internal widget
-       state and the theme, which can leave the page in a half-broken
-       state for the brief instant before the redirect lands.
-    3. Sleep ~0.3 s so the localStorage iframe finishes its delete
-       postMessage before the navigation kicks in. Without this nudge,
-       Keycloak occasionally redirects us back to Streamlit so fast
-       that the cookie is still around and `hydrate_from_cookie()`
-       signs us right back in.
-    4. Force a top-window navigation to the Keycloak end-session URL
-       (see _redirect_top_window — meta-refresh inside Streamlit's
-       inner iframe doesn't escape to the parent).
+    Two-phase design (was a single-shot JS redirect before — see the
+    fix commit, sandbox blocked it):
+
+    1. Right now: clear localStorage, drop auth state from session,
+       wipe URL params, stash the Keycloak logout URL in session_state,
+       trigger a rerun.
+    2. On the next run, the top-of-script handler sees the stashed URL
+       and renders a meta-refresh + visible click-through link instead
+       of the normal page. The redirect fires; if the browser ignores
+       the dynamic meta refresh, the user clicks the link manually.
     """
     id_token = st.session_state.get("id_token")
     try:
         logout_url = api.get_logout_url(FRONTEND_URL, id_token)
     except api.ApiError:
         # If we can't reach the backend, at least bounce the user back
-        # to the login screen locally.
+        # to the login screen locally — they're already logged out of
+        # DeepCampus by the cookie/state wipe below.
         logout_url = FRONTEND_URL
 
     ses.clear_cookie()
@@ -441,13 +417,31 @@ def _logout() -> None:
         st.session_state.pop(k, None)
     st.query_params.clear()
 
+    # localStorage delete is iframe-async (postMessage round-trip).
+    # If we rerun immediately the cookie can still be readable when
+    # hydrate_from_cookie() fires on the next run and we re-login
+    # ourselves. ~0.3 s is the empirical minimum.
     time.sleep(0.3)
-    _redirect_top_window(logout_url)
+
+    st.session_state["_pending_logout_redirect"] = logout_url
+    st.rerun()
 
 
 # ────────────────────────────────────────────────────────────────────────────
 # Auth screen (login / register)
 # ────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────────────────────────
+# Pending Keycloak end-session redirect.
+# _logout() stashes the logout URL into session_state and triggers a rerun;
+# we render the redirect screen here on the *next* run instead of inside the
+# callback, so the page has actually been redrawn before the navigation kicks
+# in (otherwise the user sees a half-blanked page while the redirect lands).
+# Pop-style read so this only fires once.
+# ────────────────────────────────────────────────────────────────────────────
+_pending_logout_redirect = st.session_state.pop("_pending_logout_redirect", None)
+if _pending_logout_redirect:
+    _render_redirect_screen(_pending_logout_redirect, "Logging out of Keycloak…")
+
 _handle_oauth_callback()
 
 if not _logged_in():
@@ -459,34 +453,45 @@ if not _logged_in():
             "Sign in via Keycloak to start asking questions.",
         )
 
-        # Primary path is browser-redirected OAuth Code flow (password
-        # never touches Streamlit). The form-based password-grant path
-        # is kept under a fallback expander for headless / API-style
-        # access and for environments where the Keycloak host isn't
-        # browser-reachable.
+        # Primary path is browser-redirected OAuth Code flow. The
+        # button is rendered as a real <a href="..."> anchor styled
+        # like a Streamlit button — NOT as st.button + JS redirect.
+        # Reasoning: Streamlit's component iframes are sandboxed
+        # without `allow-top-navigation`, so JS-driven navigation
+        # (window.top.location = ...) gets silently blocked. A plain
+        # anchor click is a native browser navigation, no sandbox
+        # involved, and it Just Works on every browser.
         #
-        # Why if-block instead of on_click: Streamlit runs on_click
-        # callbacks *before* rendering the rest of the script. Calling
-        # `st.stop()` inside the callback (which `_redirect_top_window`
-        # does) halts execution before hero/form/anything else gets
-        # painted, leaving the user on a black page until the redirect
-        # iframe mounts — sometimes it doesn't, and they're stuck. The
-        # if-block runs *after* the page has been painted, so even if
-        # the redirect stalls there's a visible login screen to fall
-        # back to.
-        if st.button(
-            "🔐 Sign in with Keycloak",
-            type="primary",
-            use_container_width=True,
-            key="kc_login_btn",
-            help="Opens the Keycloak login page in this tab.",
-        ):
-            try:
-                kc_login_url = api.get_login_url(FRONTEND_URL)
-            except api.ApiError as exc:
-                st.error(f"Could not reach the backend: {exc}")
-            else:
-                _redirect_top_window(kc_login_url)
+        # We pre-compute the URL at render time so the link is alive
+        # immediately — one click, no roundtrip through a button
+        # callback.
+        try:
+            kc_login_url = api.get_login_url(FRONTEND_URL)
+        except api.ApiError as exc:
+            kc_login_url = None
+            st.error(f"Could not reach the backend to build the Keycloak login URL: {exc}")
+
+        if kc_login_url:
+            st.markdown(
+                f"""
+                <a href="{kc_login_url}" target="_self"
+                   style="display:block;
+                          padding:12px 16px;
+                          background:linear-gradient(180deg,#F59E0B 0%,#D97706 100%);
+                          color:#111827;
+                          font-weight:600;
+                          text-align:center;
+                          text-decoration:none;
+                          border-radius:8px;
+                          font-size:1rem;
+                          margin:6px 0 4px 0;
+                          border:1px solid rgba(0,0,0,0.18);
+                          box-shadow:0 1px 2px rgba(0,0,0,0.15);">
+                    🔐 Sign in with Keycloak
+                </a>
+                """,
+                unsafe_allow_html=True,
+            )
 
         st.caption(
             "Recommended. Your password is entered on Keycloak's own login "
