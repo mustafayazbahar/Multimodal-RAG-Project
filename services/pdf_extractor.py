@@ -38,6 +38,43 @@ class ImageBlock:
 _converter = None
 
 
+def _detect_accelerator():
+    """Pick CUDA when PyTorch sees a GPU, else MPS (Apple), else CPU.
+
+    Docling's layout detector + TableFormer are torch models that
+    default to CPU. On a 50-page textbook with figures and tables
+    that's a 20-40× slowdown vs CUDA — easy to spend half an hour on
+    something the GPU finishes in two minutes.
+    """
+    try:
+        from docling.datamodel.accelerator_options import (
+            AcceleratorDevice,
+            AcceleratorOptions,
+        )
+    except ImportError:
+        # Older docling without accelerator_options — let it fall back
+        # to its internal default (CPU).
+        return None
+
+    try:
+        import torch
+        if torch.cuda.is_available():
+            device = AcceleratorDevice.CUDA
+            label = f"CUDA ({torch.cuda.get_device_name(0)})"
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            device = AcceleratorDevice.MPS
+            label = "MPS (Apple Silicon)"
+        else:
+            device = AcceleratorDevice.CPU
+            label = "CPU"
+    except Exception:  # noqa: BLE001
+        device = AcceleratorDevice.CPU
+        label = "CPU (torch unavailable)"
+
+    log.info("Docling accelerator: %s", label)
+    return AcceleratorOptions(num_threads=4, device=device)
+
+
 def _get_converter():
     """Lazy-init Docling converter with picture+table image generation enabled.
 
@@ -59,6 +96,13 @@ def _get_converter():
     pipeline_options.generate_table_images = True
     # 2.0 ≈ 144 DPI; enough for VLM captioning, keeps PNG file sizes manageable.
     pipeline_options.images_scale = 2.0
+
+    # Route Docling's torch models (layout + TableFormer + OCR) to the
+    # GPU when available. Without this they default to CPU and large
+    # textbooks take 10×+ longer to ingest.
+    accelerator = _detect_accelerator()
+    if accelerator is not None:
+        pipeline_options.accelerator_options = accelerator
 
     log.info("Initializing Docling converter (first run downloads ~1-2 GB of models)...")
     _converter = DocumentConverter(
