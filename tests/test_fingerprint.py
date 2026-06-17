@@ -17,6 +17,8 @@ except ImportError:  # pragma: no cover
 pytestmark = pytest.mark.skipif(fitz is None, reason="PyMuPDF not installed")
 
 
+# Test icin bellekte kucuk bir PDF olusturan yardimci. Metin ve metadata
+# (baslik/yazar) parametrik; harici ornek dosyaya bagimliligi ortadan kaldirir.
 def _make_pdf(path, text="Hello academic paper.", title="My Paper", author="Jane"):
     doc = fitz.open()
     page = doc.new_page()
@@ -26,6 +28,8 @@ def _make_pdf(path, text="Hello academic paper.", title="My Paper", author="Jane
     doc.close()
 
 
+# Bayt bayt ayni iki dosyanin "file" (dosya hash'i) seviyesinde duplikat
+# sayildigini dogrular. Tam ayni yuklemenin tekrarini yakalamanin guvencesi.
 def test_identical_files_match_file_hash(tmp_path):
     from services.pdf_fingerprint import compute_fingerprint
 
@@ -40,6 +44,9 @@ def test_identical_files_match_file_hash(tmp_path):
     assert fp_a.is_duplicate_of(fp_b) == "file"
 
 
+# Dosya baytlari birebir ayni olmasa da (fitz zaman damgalari nedeniyle) ayni
+# icerige sahip PDF'lerin "content" seviyesinde duplikat sayildigini dogrular.
+# Ayni makalenin yeniden uretilmis kopyalarini yakalamak icin onemli.
 def test_same_content_different_metadata_matches_content(tmp_path):
     from services.pdf_fingerprint import compute_fingerprint
 
@@ -55,6 +62,8 @@ def test_same_content_different_metadata_matches_content(tmp_path):
     assert fp_a.is_duplicate_of(fp_b) in {"file", "content"}
 
 
+# Icerigi farkli iki PDF'in duplikat olarak isaretlenmedigini (None) dogrular.
+# Yanlis pozitif dedup'i onleyerek farkli belgelerin silinmemesini garanti eder.
 def test_different_content_no_match(tmp_path):
     from services.pdf_fingerprint import compute_fingerprint
 

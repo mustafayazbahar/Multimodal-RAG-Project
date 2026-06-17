@@ -11,6 +11,8 @@ class FakePoint:
     payload: dict | None = None
 
 
+# Fuzyon fonksiyonunu taze halde almak icin modulu cache'ten dusurup yeniden
+# import ediyoruz; boylece test izole calisir.
 def _load_fuse():
     import importlib
 
@@ -18,6 +20,8 @@ def _load_fuse():
     return importlib.import_module("services.fusion").reciprocal_rank_fusion
 
 
+# RRF'in yogun (dense) ve seyrek (sparse) iki sonuc listesini birlestirebildigini
+# dogrular. Hibrit aramanin temel cekirdegi oldugu icin kritik.
 def test_rrf_combines_two_lists():
     fuse = _load_fuse()
     dense = [FakePoint("a"), FakePoint("b"), FakePoint("c")]
@@ -30,6 +34,8 @@ def test_rrf_combines_two_lists():
     assert "d" in ids
 
 
+# Agirlik parametrelerinin (dense_w/sparse_w) siralamayi gercekten etkiledigini
+# dogrular. Yogun/seyrek dengesinin ayarlanabilir oldugunun guvencesidir.
 def test_rrf_weights_bias_results():
     fuse = _load_fuse()
     dense = [FakePoint("only_dense")]
@@ -42,6 +48,8 @@ def test_rrf_weights_bias_results():
     assert result_rev[0][0].id == "only_sparse"
 
 
+# Bos listelerle veya tek listenin bos olmasi durumunda fuzyonun cokmedigini
+# dogrular. Hicbir sonuc donmedigi uc durumlarda saglamligin guvencesidir.
 def test_rrf_handles_empty_lists():
     fuse = _load_fuse()
     assert fuse([], [], dense_w=0.5, sparse_w=0.5, k=60) == []

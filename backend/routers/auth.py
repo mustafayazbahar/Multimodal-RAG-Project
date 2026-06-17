@@ -37,9 +37,13 @@ from services.keycloak_auth import (
     verify_token,
 )
 
+# Bu modulun tum endpoint'leri /auth on eki altinda toplanir.
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
+# Yardimci: ham access_token'i dogrulayip claim'lerden rol/kullanici cikararak
+# standart TokenResponse'a cevirir. Tum giris yollari (login/register/exchange)
+# cevabi ayni sekle getirmek icin bunu kullanir.
 def _token_response(access_token: str, id_token: str | None = None) -> TokenResponse:
     claims = verify_token(access_token)
     user = extract_user(claims)
@@ -51,8 +55,10 @@ def _token_response(access_token: str, id_token: str | None = None) -> TokenResp
     )
 
 
+# Parola grant'i ile giris: kullanici adi/parola alir, Keycloak'tan token ister.
 @router.post("/login", response_model=TokenResponse)
 def login(payload: LoginRequest) -> TokenResponse:
+    # Kullanici adindaki bas/son bosluklar temizlenir; hatali kimlik 401 doner.
     try:
         token_data = kc_login(payload.username.strip(), payload.password)
     except KeycloakError as exc:
@@ -62,8 +68,12 @@ def login(payload: LoginRequest) -> TokenResponse:
     return _token_response(token_data["access_token"], token_data.get("id_token"))
 
 
+# Yeni kullanici kaydi: Keycloak Admin API uzerinden hesap olusturur ve
+# ardindan eski form akisiyla uyumlu olmak icin kullaniciyi otomatik giris yaptirir.
 @router.post("/register", response_model=TokenResponse)
 def register(payload: RegisterRequest) -> TokenResponse:
+    # Yeni kayitlar her zaman "student" rolu ile acilir. Kullanici adi/email
+    # zaten varsa Keycloak hata verir; bunu 409 Conflict olarak doneriz.
     try:
         create_user(
             username=payload.username.strip(),
@@ -80,6 +90,9 @@ def register(payload: RegisterRequest) -> TokenResponse:
 
     # Auto-login the freshly created user so the frontend gets a token
     # without a second round-trip.
+    # Yeni olusturulan kullaniciyi hemen giris yaptir ki frontend ikinci bir
+    # istek atmadan token alsin. Hesap acildi ama giris basarisiz olursa, durumu
+    # acikca belirten bir 401 doneriz (kayit kismen tamamlandi).
     try:
         token_data = kc_login(payload.username.strip(), payload.password)
     except KeycloakError as exc:
@@ -93,12 +106,16 @@ def register(payload: RegisterRequest) -> TokenResponse:
 # ─────────────────────────────────────────────────────────────────────────
 # OAuth Authorization Code flow
 # ─────────────────────────────────────────────────────────────────────────
+# Adim 1: Frontend'in tarayiciyi yonlendirecegi Keycloak /auth URL'ini uretir.
+# redirect_uri, Keycloak'in kullaniciyi kod ile geri gonderecegi adrestir.
 @router.get("/login-url", response_model=OauthUrlResponse)
 def get_login_url(redirect_uri: str = Query(..., description="Browser callback URL")) -> OauthUrlResponse:
     """Return the Keycloak `/auth` URL the frontend should redirect to."""
     return OauthUrlResponse(url=build_login_url(redirect_uri))
 
 
+# Adim 2: Keycloak'tan donen yetki kodunu (code) gercek token'lara cevirir ve
+# standart TokenResponse doner. Gecersiz kod/redirect durumunda 401 verir.
 @router.post("/exchange-code", response_model=TokenResponse)
 def post_exchange_code(payload: ExchangeCodeRequest) -> TokenResponse:
     """Exchange a Keycloak callback `code` for our standard TokenResponse."""
@@ -111,6 +128,8 @@ def post_exchange_code(payload: ExchangeCodeRequest) -> TokenResponse:
     return _token_response(token_data["access_token"], token_data.get("id_token"))
 
 
+# Cikis: Keycloak'in end-session URL'ini uretir. id_token_hint verilirse onay
+# ekrani atlanir (sessiz cikis); bu yuzden frontend son id_token'i buraya iletir.
 @router.get("/logout-url", response_model=OauthUrlResponse)
 def get_logout_url(
     redirect_uri: str = Query(..., description="Where to send the user after logout"),

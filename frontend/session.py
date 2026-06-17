@@ -51,15 +51,19 @@ except Exception:  # noqa: BLE001
     LocalStorage = None  # type: ignore
     _LS_AVAILABLE = False
 
+# localStorage'da oturum verisinin saklandigi anahtar.
 SESSION_KEY = "dc_session"
+# JWT'nin gecerlilik suresi (saat); ortam degiskeninden okunur, varsayilan 12 saat.
 JWT_TTL_HOURS = int(os.getenv("JWT_TTL_HOURS", "12"))
 # Streamlit components iframe needs a couple of reruns to push the
 # localStorage value back into Python on a cold page load. 12 * 0.3 s
 # = 3.6 s is comfortably above the worst observed iframe boot time.
+# Yeniden deneme butcesi ve denemeler arasi bekleme suresi (saniye).
 RETRY_BUDGET = 12
 RETRY_DELAY_S = 0.3
 
 
+# Streamlit oturumu basina TEK bir LocalStorage ornegi olusturup onbellekler.
 def _storage() -> "LocalStorage | None":
     """Return a single LocalStorage instance per Streamlit session.
 
@@ -83,6 +87,8 @@ def _decode(raw: object) -> dict | None:
     """
     if raw is None or raw == "":
         return None
+    # localStorage bazen dogrudan dict, bazen JSON string dondurebilir; her iki
+    # durumu da destekleyip beklenmeyen tipleri (junk) None'a indiriyoruz.
     if isinstance(raw, dict):
         data = raw
     elif isinstance(raw, str):
@@ -94,6 +100,8 @@ def _decode(raw: object) -> dict | None:
         return None
     if not isinstance(data, dict):
         return None
+    # Zorunlu alanlar eksikse blob gecersizdir; opsiyonel alanlar (session_id,
+    # id_token) eski kayitlarda bulunmayabilir, onlar dogrulamada aranmaz.
     if not all(k in data for k in ("token", "username", "role")):
         return None
     return data
@@ -185,10 +193,12 @@ def hydrate_from_cookie() -> None:
     RETRY_BUDGET attempts we stop trying so an empty localStorage
     (user never logged in, or signed out) doesn't loop forever.
     """
+    # Oturum zaten doluysa (kullanici bu calismada giris yapmis) hicbir sey yapma.
     if st.session_state.get("token"):
         return
 
     cookie = load_cookie()
+    # Gecerli blob bulunduysa session_state'i geri doldur ve deneme sayacini sifirla.
     if cookie:
         st.session_state.token = cookie["token"]
         st.session_state.username = cookie["username"]
@@ -201,6 +211,9 @@ def hydrate_from_cookie() -> None:
         st.session_state["_ls_attempts"] = 0
         return
 
+    # Blob henuz gelmediyse: iframe degerini Python'a itene kadar kisa araliklarla
+    # birkac kez yeniden dene. Butce dolunca durur ki bos localStorage'da (hic
+    # giris yapmamis kullanici) sonsuz dongu olusmasin.
     attempts = st.session_state.get("_ls_attempts", 0)
     if attempts < RETRY_BUDGET:
         st.session_state["_ls_attempts"] = attempts + 1

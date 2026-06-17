@@ -22,12 +22,15 @@ from services.logging_config import get_logger
 log = get_logger(__name__)
 
 
+# Docling'den cikarilan bir metin parcasini temsil eder (metin + ait oldugu sayfa).
 @dataclass
 class TextBlock:
     text: str
     page: int  # 0-indexed
 
 
+# Docling'den cikarilan bir gorseli temsil eder: diske kaydedilen PNG yolu,
+# sayfa numarasi ve turu (figur mu tablo mu).
 @dataclass
 class ImageBlock:
     image_path: str
@@ -35,6 +38,8 @@ class ImageBlock:
     kind: str  # "picture" or "table"
 
 
+# Docling cevirici tekil (singleton) olarak tutulur; ilk kullanimda kurulup
+# tekrar tekrar yeniden olusturulmaz (model indirme/yuklemesi pahalidir).
 _converter = None
 
 
@@ -46,6 +51,8 @@ def _detect_accelerator():
     that's a 20-40× slowdown vs CUDA — easy to spend half an hour on
     something the GPU finishes in two minutes.
     """
+    # Eski Docling surumlerinde accelerator_options modulu yoktur; bu durumda
+    # None dondururuz ve Docling kendi varsayilanina (CPU) duser.
     try:
         from docling.datamodel.accelerator_options import (
             AcceleratorDevice,
@@ -56,6 +63,8 @@ def _detect_accelerator():
         # to its internal default (CPU).
         return None
 
+    # Donanim tespiti torch'a bagli; torch yoksa veya tespit patlarsa guvenli
+    # sekilde CPU'ya geri duseriz (asagidaki genis except bunu garantiler).
     try:
         import torch
         if torch.cuda.is_available():
@@ -72,6 +81,7 @@ def _detect_accelerator():
         label = "CPU (torch unavailable)"
 
     log.info("Docling accelerator: %s", label)
+    # num_threads=4: CPU'ya dusulen durumlarda is parcacigi sayisini sinirlar.
     return AcceleratorOptions(num_threads=4, device=device)
 
 
@@ -82,24 +92,32 @@ def _get_converter():
     subsequent calls use the cached models from the hf_cache volume.
     """
     global _converter
+    # Daha once kurulmussa hazir ceviriciyi dondur (tekrar kurma maliyetini onler).
     if _converter is not None:
         return _converter
 
+    # Docling import'lari fonksiyon icinde: modul yuku agir oldugundan sadece
+    # gercekten ihtiyac duyuldugunda (ilk cagrida) yuklenir.
     from docling.datamodel.base_models import InputFormat
     from docling.datamodel.pipeline_options import PdfPipelineOptions
     from docling.document_converter import DocumentConverter, PdfFormatOption
 
+    # Pipeline ayarlari: OCR (taranmis sayfalar icin), tablo yapisi tespiti ve
+    # hem figur hem tablo bolgelerini PNG olarak uretmeyi aciyoruz.
     pipeline_options = PdfPipelineOptions()
     pipeline_options.do_ocr = True
     pipeline_options.do_table_structure = True
     pipeline_options.generate_picture_images = True
     pipeline_options.generate_table_images = True
     # 2.0 ≈ 144 DPI; enough for VLM captioning, keeps PNG file sizes manageable.
+    # Olcek araligi: VLM ozetlemesi icin yeterli netlik, ama dosya boyutu makul.
     pipeline_options.images_scale = 2.0
 
     # Route Docling's torch models (layout + TableFormer + OCR) to the
     # GPU when available. Without this they default to CPU and large
     # textbooks take 10×+ longer to ingest.
+    # GPU tespit edilirse Docling'in torch modellerini oraya yonlendir; aksi
+    # halde Docling kendi varsayilanini (CPU) kullanir.
     accelerator = _detect_accelerator()
     if accelerator is not None:
         pipeline_options.accelerator_options = accelerator
@@ -114,6 +132,9 @@ def _get_converter():
     return _converter
 
 
+# Docling'in "provenance" (kaynak konum) listesinden 0-tabanli sayfa numarasini
+# cikarir. Docling 1-tabanli verir, biz 1 cikararak 0-tabana ceviriyoruz.
+# Bilgi yoksa veya bicim beklenenden farkliysa guvenli sekilde 0 doner.
 def _page_number(prov_list) -> int:
     """Return the 0-indexed page number for a Docling provenance list."""
     if not prov_list:
@@ -124,11 +145,15 @@ def _page_number(prov_list) -> int:
         return 0
 
 
+# Docling gorsel nesnesini diske PNG olarak kaydeder; basariliysa yolu, aksi
+# halde None doner. Kaydetme hatasi tum cikarimi durdurmamali (uyari verip gecer).
 def _save_pil(image_obj, dest: Path) -> Optional[Path]:
     """Save a Docling image object to disk as PNG. Returns the path or None."""
     if image_obj is None:
         return None
     # Docling exposes the PIL image via .pil_image; tolerate either layout.
+    # Docling kimi surumde PIL goruntusunu .pil_image altinda, kimi surumde
+    # dogrudan nesnenin kendisi olarak verir; her iki duruma da uyum sagliyoruz.
     pil = getattr(image_obj, "pil_image", None) or image_obj
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -145,11 +170,14 @@ def extract(pdf_path: Path, img_folder: Path) -> tuple[list[TextBlock], list[Ima
     Raises on conversion failure so the caller can fall back to PyMuPDF.
     """
     converter = _get_converter()
+    # Asil donusturme adimi: Docling PDF'i okuyup yapilandirilmis dokumana cevirir.
     result = converter.convert(str(pdf_path))
     doc = result.document
 
     # Group all text-bearing items by page, preserving document order via the
     # iterate_items walk.
+    # Metin iceren tum ogeleri sayfa bazinda grupla. iterate_items dokuman
+    # sirasini koruyarak gezdigi icin metin parcalari dogru sirada birikir.
     page_texts: dict[int, list[str]] = {}
     for item, _level in doc.iterate_items():
         text = getattr(item, "text", None)
@@ -159,6 +187,8 @@ def extract(pdf_path: Path, img_folder: Path) -> tuple[list[TextBlock], list[Ima
         page = _page_number(prov)
         page_texts.setdefault(page, []).append(text.strip())
 
+    # Her sayfanin metin parcalarini tek bir metne birlestir; tamamen bos
+    # sayfalari atla (any(parts) kontrolu).
     text_blocks: list[TextBlock] = [
         TextBlock(text="\n".join(parts).strip(), page=page)
         for page, parts in sorted(page_texts.items())
@@ -168,6 +198,7 @@ def extract(pdf_path: Path, img_folder: Path) -> tuple[list[TextBlock], list[Ima
     image_blocks: list[ImageBlock] = []
 
     # Pictures (figures, diagrams, embedded raster).
+    # Figurler/diyagramlar: her birini PNG'ye kaydet, basariliysa ImageBlock ekle.
     for idx, pic in enumerate(getattr(doc, "pictures", []) or []):
         page = _page_number(getattr(pic, "prov", None))
         out = img_folder / f"page_{page + 1}_picture_{idx + 1}.png"
@@ -175,6 +206,8 @@ def extract(pdf_path: Path, img_folder: Path) -> tuple[list[TextBlock], list[Ima
             image_blocks.append(ImageBlock(image_path=str(out), page=page, kind="picture"))
 
     # Tables (TableFormer-detected regions).
+    # Tablolar: TableFormer ile tespit edilen bolgeler; figurlerle ayni mantik,
+    # ama kind="table" olarak isaretlenir (sonradan ayirt edilebilsin diye).
     for idx, tbl in enumerate(getattr(doc, "tables", []) or []):
         page = _page_number(getattr(tbl, "prov", None))
         out = img_folder / f"page_{page + 1}_table_{idx + 1}.png"

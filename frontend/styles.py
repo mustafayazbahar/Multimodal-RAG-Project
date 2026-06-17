@@ -35,6 +35,9 @@ _VARS_DARK = """
   --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
 """
 
+# Acik tema icin CSS degisken seti. Koyu tema ile ayni degisken adlarini
+# kullanir; sadece renk degerleri farklidir, boylece _CSS_BODY her iki temada
+# de degismeden calisir.
 _VARS_LIGHT = """
   --accent: #D97706;
   --accent-strong: #B45309;
@@ -57,6 +60,9 @@ _VARS_LIGHT = """
   --shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
 """
 
+# Asil CSS govdesi (temadan bagimsiz). Yukaridaki :root degiskenlerine
+# (var(--...)) dayanir; r"" ham string'dir cunku icinde kacis gerektirebilecek
+# karakterler var. ICERIGI DEGISTIRME.
 _CSS_BODY = r"""
 /* ───────── Global ───────── */
 html, body, .stApp {
@@ -360,7 +366,11 @@ div[data-testid="stVerticalBlockBorderWrapper"]:hover {
 
 def inject_styles(theme: str = "dark") -> None:
     """Inject the project's CSS with the requested theme baked in."""
+    # Istenen temaya gore degisken seti secilir; "light" disindaki her deger
+    # (None dahil) koyu temaya duser.
     variables = _VARS_LIGHT if theme == "light" else _VARS_DARK
+    # Secilen degiskenler :root icine, ardindan ortak CSS govdesi tek bir
+    # <style> blogunda sayfaya enjekte edilir.
     css = f"<style>:root {{{variables}}}\n{_CSS_BODY}</style>"
     st.markdown(css, unsafe_allow_html=True)
 

@@ -7,13 +7,20 @@ from typing import Iterator
 
 import requests
 
+# Backend FastAPI adresi ortam degiskeninden okunur; Docker icinde varsayilan
+# "http://backend:8000". Sondaki "/" temizlenir ki URL birlestirmede cift
+# slash olusmasin.
 BACKEND_URL = os.getenv("BACKEND_URL", "http://backend:8000").rstrip("/")
 
 
+# Backend cagrilarinda olusan tum hatalar bu ortak istisna tipiyle firlatilir;
+# boylece arayuz katmani tek bir except blogu ile yakalayabilir.
 class ApiError(RuntimeError):
     pass
 
 
+# Istek basliklarini olusturan yardimci. Token verilirse Bearer yetkilendirme
+# basligini ekler; verilmezse sadece JSON kabul basligi doner.
 def _headers(token: str | None = None) -> dict:
     h = {"Accept": "application/json"}
     if token:
@@ -21,12 +28,15 @@ def _headers(token: str | None = None) -> dict:
     return h
 
 
+# Kullanici adi/parola ile backend uzerinden giris yapar ve token bilgisini doner.
 def login(username: str, password: str) -> dict:
     resp = requests.post(
         f"{BACKEND_URL}/auth/login",
         json={"username": username, "password": password},
         timeout=10,
     )
+    # 200 disindaki her durum basarisiz giris sayilir; backend'in dondurdugu
+    # "detail" mesaji varsa onu, yoksa genel bir mesaji istisnaya tasiriz.
     if resp.status_code != 200:
         raise ApiError(resp.json().get("detail", "Login failed"))
     return resp.json()
@@ -55,6 +65,8 @@ def register(
         },
         timeout=15,
     )
+    # Basarili kayit 200 veya 201 doner. Hata govdesi her zaman JSON olmayabilir
+    # (orn. proxy/gateway hatasi), bu yuzden cozumlemeyi try ile koruyoruz.
     if resp.status_code not in (200, 201):
         try:
             detail = resp.json().get("detail", "Register failed")
@@ -88,8 +100,11 @@ def exchange_code(code: str, redirect_uri: str) -> dict:
     return resp.json()
 
 
+# Keycloak'tan cikis (logout) URL'sini ister. id_token_hint verilirse Keycloak
+# onay sayfasi gostermeden sessiz cikis yapar; bu yuzden parametre opsiyonel.
 def get_logout_url(redirect_uri: str, id_token_hint: str | None = None) -> str:
     params = {"redirect_uri": redirect_uri}
+    # id_token elimizde varsa sorgu parametresi olarak ekleriz (sessiz logout icin).
     if id_token_hint:
         params["id_token_hint"] = id_token_hint
     resp = requests.get(
@@ -118,6 +133,7 @@ def get_history(token: str, session_id: str | None = None) -> tuple[list[dict], 
     return body.get("messages", []), body.get("session_id", "")
 
 
+# Belirtilen oturumun (verilmezse aktif/varsayilan oturumun) sohbet gecmisini siler.
 def clear_history(token: str, session_id: str | None = None) -> None:
     params = {"session_id": session_id} if session_id else {}
     resp = requests.delete(
@@ -133,6 +149,7 @@ def clear_history(token: str, session_id: str | None = None) -> None:
 # ─────────────────────────────────────────────────────────────────────────
 # Sessions ("Topics")
 # ─────────────────────────────────────────────────────────────────────────
+# Kullanicinin tum sohbet oturumlarini ("Topics") listeler.
 def list_sessions(token: str) -> list[dict]:
     resp = requests.get(
         f"{BACKEND_URL}/chat/sessions", headers=_headers(token), timeout=10
@@ -142,6 +159,7 @@ def list_sessions(token: str) -> list[dict]:
     return resp.json().get("sessions", [])
 
 
+# Verilen baslikla yeni bir sohbet oturumu olusturur ve olusan oturumu doner.
 def create_session(token: str, title: str) -> dict:
     resp = requests.post(
         f"{BACKEND_URL}/chat/sessions",
@@ -154,6 +172,7 @@ def create_session(token: str, title: str) -> dict:
     return resp.json()
 
 
+# Mevcut bir oturumun basligini gunceller (PATCH ile kismi guncelleme).
 def rename_session(token: str, session_id: str, title: str) -> dict:
     resp = requests.patch(
         f"{BACKEND_URL}/chat/sessions/{session_id}",
@@ -166,12 +185,14 @@ def rename_session(token: str, session_id: str, title: str) -> dict:
     return resp.json()
 
 
+# Verilen oturumu kalici olarak siler.
 def delete_session(token: str, session_id: str) -> None:
     resp = requests.delete(
         f"{BACKEND_URL}/chat/sessions/{session_id}",
         headers=_headers(token),
         timeout=10,
     )
+    # 204 (No Content) da basarili sayilir; silme sonrasi govde donmeyebilir.
     if resp.status_code not in (200, 204):
         try:
             detail = resp.json().get("detail", "Delete failed")
@@ -180,6 +201,7 @@ def delete_session(token: str, session_id: str) -> None:
         raise ApiError(detail)
 
 
+# Backend uzerinde kullanilabilir LLM modellerinin listesini doner.
 def list_models(token: str) -> dict:
     resp = requests.get(f"{BACKEND_URL}/chat/models", headers=_headers(token), timeout=10)
     if resp.status_code != 200:
@@ -189,6 +211,8 @@ def list_models(token: str) -> dict:
 
 def pull_model(token: str, model: str) -> Iterator[dict]:
     """Stream pull-progress events from the backend."""
+    # Model indirme uzun surebilecegi icin stream=True ve timeout=None kullanilir;
+    # backend her ilerleme olayini ayri bir JSON satiri olarak gonderir.
     with requests.post(
         f"{BACKEND_URL}/chat/models/pull",
         json={"model": model},
@@ -202,6 +226,8 @@ def pull_model(token: str, model: str) -> Iterator[dict]:
             except json.JSONDecodeError:
                 detail = resp.text
             raise ApiError(f"Pull failed: {detail}")
+        # Gelen NDJSON akisini satir satir oku; bos satirlari ve bozuk JSON
+        # parcalarini atlayarak her gecerli olayi cagirana yield ederiz.
         for line in resp.iter_lines():
             if not line:
                 continue
@@ -211,6 +237,8 @@ def pull_model(token: str, model: str) -> Iterator[dict]:
                 continue
 
 
+# RAG sorgusunu backend'e gonderir ve cevabi parca parca (streaming) doner.
+# Cevap NDJSON akisidir: token parcalari, kaynaklar ve durum olaylari icerir.
 def stream_query(
     token: str,
     query: str,
@@ -219,6 +247,7 @@ def stream_query(
     top_k: int,
     session_id: str | None = None,
 ) -> Iterator[dict]:
+    # Sorgu parametreleri tek bir JSON govdesinde toplanir.
     payload = {
         "query": query,
         "model": model,
@@ -226,6 +255,8 @@ def stream_query(
         "top_k": top_k,
         "session_id": session_id,
     }
+    # stream=True ile yanit beklemeden akis baslar; timeout=600 uzun LLM
+    # uretimleri icin genis tutulmustur.
     with requests.post(
         f"{BACKEND_URL}/chat/query",
         json=payload,
@@ -239,6 +270,7 @@ def stream_query(
             except json.JSONDecodeError:
                 detail = resp.text
             raise ApiError(f"Query failed: {detail}")
+        # NDJSON akisini satir satir cozumleyip her olayi cagirana aktariyoruz.
         for line in resp.iter_lines():
             if not line:
                 continue
@@ -248,6 +280,7 @@ def stream_query(
                 continue
 
 
+# Ingest (belge isleme) surecinin guncel durumunu doner.
 def ingest_status(token: str) -> dict:
     resp = requests.get(f"{BACKEND_URL}/ingest/status", headers=_headers(token), timeout=15)
     if resp.status_code != 200:
@@ -255,6 +288,9 @@ def ingest_status(token: str) -> dict:
     return resp.json()
 
 
+# PDF dosyasini multipart/form-data olarak backend'e yukler.
+# Not: Content-Type'i requests'in dosya sinirlayicisini (boundary) kendisinin
+# ayarlamasi icin _headers kullanmadan sadece Authorization basligi gonderiyoruz.
 def upload_pdf(token: str, filename: str, data: bytes) -> dict:
     files = {"file": (filename, data, "application/pdf")}
     resp = requests.post(
@@ -268,6 +304,8 @@ def upload_pdf(token: str, filename: str, data: bytes) -> dict:
     return resp.json()
 
 
+# Yuklenen belgeler icin ingest (parcalama + gomme + indeksleme) surecini baslatir.
+# Islem cok uzun surebildiginden timeout 1 saat (3600 sn) olarak ayarlanmistir.
 def run_ingest(token: str) -> dict:
     resp = requests.post(
         f"{BACKEND_URL}/ingest/run", headers=_headers(token), timeout=3600
@@ -277,6 +315,7 @@ def run_ingest(token: str) -> dict:
     return resp.json()
 
 
+# Bilgi tabanini (vektor deposu + islenmis belgeler) sifirlar.
 def reset_knowledge_base(token: str) -> dict:
     resp = requests.post(
         f"{BACKEND_URL}/ingest/reset", headers=_headers(token), timeout=60
