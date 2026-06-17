@@ -162,41 +162,72 @@ def render(md_path: Path, pdf_path: Path) -> None:
             i += 1
             continue
 
-        # --- Blockquote (>) ---
+        # --- Blockquote (>) — ardisik > satirlarini tek paragrafta topla ---
         if line.startswith(">"):
-            quote = _clean(line.lstrip(">").strip())
+            quote_lines = []
+            while i < len(lines) and lines[i].lstrip().startswith(">"):
+                # ">" karakterini ve hemen ardindan opsiyonel bosluk soyup metni al.
+                quote_lines.append(lines[i].lstrip().lstrip(">").lstrip())
+                i += 1
+            # Bos > satirlari paragraf icinde gercek satir kirigi olur.
+            quote = "\n".join(quote_lines).strip()
             pdf.set_font("DejaVu", "", 9.5)
             pdf.set_text_color(*MUTED)
             pdf.set_x(pdf.l_margin + 4)
-            pdf.multi_cell(epw - 4, 5.2, quote)
+            pdf.multi_cell(epw - 4, 5.2, _clean(quote), align="L", new_x="LMARGIN", new_y="NEXT")
             pdf.ln(1)
-            i += 1
             continue
 
-        # --- Liste ogesi ---
+        # --- Liste ogesi (bullet) — devam satirlarini maddeye dahil et ---
         m = re.match(r"^(\s*)[-*]\s+(.*)$", line)
         if m:
             indent = len(m.group(1)) // 2
-            text = _clean(m.group(2))
+            parts = [m.group(2)]
+            # Maddeyi takip eden, bos olmayan ve yeni bir liste/baslik olmayan
+            # indentli devam satirlarini ayni maddeye birlestir.
+            j = i + 1
+            while j < len(lines):
+                nxt = lines[j].rstrip()
+                if not nxt.strip() or nxt.startswith(("#", ">", "```", "|")):
+                    break
+                if re.match(r"^\s*[-*]\s+", nxt) or re.match(r"^\s*\d+\.\s+", nxt):
+                    break
+                # Devam satiri: baslarindaki tum bosluklari sok (indent goz ardi).
+                parts.append(nxt.lstrip())
+                j += 1
+            text = _clean(" ".join(parts))
             pdf.set_font("DejaVu", "", 10)
             pdf.set_text_color(*DARK)
             bullet_x = pdf.l_margin + 3 + indent * 5
             pdf.set_x(bullet_x)
-            pdf.multi_cell(epw - (bullet_x - pdf.l_margin), 5.4, f"•  {text}")
-            i += 1
+            pdf.multi_cell(epw - (bullet_x - pdf.l_margin), 5.4, f"•  {text}",
+                           align="L", new_x="LMARGIN", new_y="NEXT")
+            i = j
             continue
 
-        # --- Numarali liste ---
+        # --- Numarali liste — devam satirlarini maddeye dahil et ---
         m = re.match(r"^(\s*)(\d+)\.\s+(.*)$", line)
         if m:
             indent = len(m.group(1)) // 2
-            text = _clean(m.group(3))
+            number = m.group(2)
+            parts = [m.group(3)]
+            j = i + 1
+            while j < len(lines):
+                nxt = lines[j].rstrip()
+                if not nxt.strip() or nxt.startswith(("#", ">", "```", "|")):
+                    break
+                if re.match(r"^\s*[-*]\s+", nxt) or re.match(r"^\s*\d+\.\s+", nxt):
+                    break
+                parts.append(nxt.lstrip())
+                j += 1
+            text = _clean(" ".join(parts))
             pdf.set_font("DejaVu", "", 10)
             pdf.set_text_color(*DARK)
             x = pdf.l_margin + 3 + indent * 5
             pdf.set_x(x)
-            pdf.multi_cell(epw - (x - pdf.l_margin), 5.4, f"{m.group(2)}.  {text}")
-            i += 1
+            pdf.multi_cell(epw - (x - pdf.l_margin), 5.4, f"{number}.  {text}",
+                           align="L", new_x="LMARGIN", new_y="NEXT")
+            i = j
             continue
 
         # --- Bos satir ---
@@ -205,11 +236,32 @@ def render(md_path: Path, pdf_path: Path) -> None:
             i += 1
             continue
 
-        # --- Normal paragraf ---
+        # --- Normal paragraf: ardisik dolu satirlari TEK paragrafa birlestir ---
+        # Markdown'da paragrafin satir bolunmesi (boslukla ayrilmamis ardisik
+        # satirlar) anlamsizdir; PDF'te bunlari tek multi_cell olarak basinca
+        # fpdf2 dogal olarak sarar. Ayri ayri basinca "(local-first)" gibi
+        # devam satirlari sirit gibi kayiyordu.
+        para_lines = [line]
+        j = i + 1
+        while j < len(lines):
+            nxt = lines[j].rstrip()
+            # Paragrafi sonlandiran durumlar: bos satir, baslik, liste, alintidir,
+            # kod blogu, tablo veya yatay cizgi.
+            if (not nxt.strip()
+                    or nxt.startswith(("#", ">", "```", "|"))
+                    or nxt.strip() in ("---", "***", "___")
+                    or re.match(r"^\s*[-*]\s+", nxt)
+                    or re.match(r"^\s*\d+\.\s+", nxt)):
+                break
+            para_lines.append(nxt)
+            j += 1
+        paragraph = " ".join(para_lines)
         pdf.set_font("DejaVu", "", 10)
         pdf.set_text_color(*DARK)
-        pdf.multi_cell(epw, 5.4, _clean(line))
-        i += 1
+        # align="L": sola hizali (justify yerine) — uzun teknik kelimeler
+        # arasinda asiri bosluk olusmasini onler.
+        pdf.multi_cell(epw, 5.4, _clean(paragraph), align="L", new_x="LMARGIN", new_y="NEXT")
+        i = j
 
     pdf.output(str(pdf_path))
 
@@ -219,16 +271,33 @@ def _heading(pdf: PDF, text: str, size: int, color, top: float, bottom: float) -
     pdf.ln(top)
     pdf.set_font("DejaVu", "B", size)
     pdf.set_text_color(*color)
-    pdf.multi_cell(pdf.epw, size * 0.5, text)
+    # align="L" ile sola hizali bas — JUSTIFY uzun basliklarda kelimeleri ayirip
+    # "Proje    Rehberi    ve    Kod" gibi sirit gosteriyordu.
+    pdf.multi_cell(pdf.epw, size * 0.5, text, align="L", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(bottom)
 
 
 def _render_code(pdf: PDF, code_lines: list[str], epw: float) -> None:
-    """Kod blogunu monospace + arka plan kutusu olarak basar."""
+    """Kod blogunu monospace + arka plan kutusu olarak basar.
+
+    Dosya agaci gibi 80+ karakterlik blok'lar icin font boyutu icerigin
+    sigmasina gore dinamik secilir: cok uzun satir varsa kuculur.
+    """
     pdf.ln(1)
-    pdf.set_font("DejaVuMono", "", 8)
+    # En uzun satira gore font boyutunu sec — boylece uzun ASCII agaclar
+    # sayfaya sigar, kisa kod bloklari da gereksiz kuculmez.
+    max_len = max((len(l) for l in code_lines), default=0)
+    if max_len > 95:
+        font_size = 6.5
+        line_h = 3.6
+    elif max_len > 75:
+        font_size = 7.5
+        line_h = 4.0
+    else:
+        font_size = 8.0
+        line_h = 4.2
+    pdf.set_font("DejaVuMono", "", font_size)
     pdf.set_text_color(*DARK)
-    line_h = 4.2
     # Once arka plan dikdortgenini cizebilmek icin yukseklik hesapla.
     # Cok uzun satirlar sarilabilir; basitlik icin sayfa sonu kontrolunu
     # multi_cell'e birakiyoruz ve her satiri ayri basiyoruz.
